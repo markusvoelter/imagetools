@@ -15,6 +15,7 @@ from . import (
     PROJECT_ROOT,
     RunCancelled,
     RunContext,
+    WALLS_DIR,
     WATERMARKS_DIR,
     ensure_output_dir,
 )
@@ -23,6 +24,8 @@ from . import collage as collage_mod
 from . import cropping as cropping_mod
 from . import reel as reel_mod
 from . import rotate_video as rotate_video_mod
+from . import split as split_mod
+from . import walls as walls_mod
 
 
 # ---------------------------------------------------------------------------
@@ -31,7 +34,7 @@ from . import rotate_video as rotate_video_mod
 
 def pick_dir(var, initial=None):
     path = filedialog.askdirectory(
-        initialdir=initial or var.get() or PROJECT_ROOT
+        initialdir=var.get() or initial or PROJECT_ROOT
     )
     if path:
         var.set(path)
@@ -170,6 +173,11 @@ class RunnerTab(ttk.Frame):
         self.status.config(text="Running...")
         self.last_output = None
 
+        self.worker = threading.Thread(target=self._make_target(kwargs), daemon=True)
+        self.worker.start()
+
+    def _make_target(self, kwargs):
+        """Build the worker thread target. Default: call run_fn once."""
         def target():
             try:
                 result = self.run_fn(**kwargs)
@@ -181,9 +189,7 @@ class RunnerTab(ttk.Frame):
                 self._push_log(traceback.format_exc())
             finally:
                 self.log_queue.put(None)
-
-        self.worker = threading.Thread(target=target, daemon=True)
-        self.worker.start()
+        return target
 
     def _on_done(self):
         self.worker = None
@@ -219,6 +225,7 @@ class CollageTab(RunnerTab):
     def _build_form(self):
         self.folder = tk.StringVar()
         self.style = tk.StringVar(value="mosaic")
+        self.repetitions = tk.StringVar(value="5")
         self.output = tk.StringVar()
         self.num_cols = tk.StringVar()
         self.aspect = tk.StringVar(value="16:9")
@@ -241,6 +248,10 @@ class CollageTab(RunnerTab):
         ttk.Combobox(grid, textvariable=self.style,
                      values=list(collage_mod.STYLES),
                      state="readonly").grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="Repetitions").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.repetitions, width=10).grid(row=r, column=1, sticky="w", padx=4)
         r += 1
 
         ttk.Label(grid, text="Output file (optional)").grid(row=r, column=0, sticky="w", pady=2)
@@ -282,6 +293,15 @@ class CollageTab(RunnerTab):
     def _gather_kwargs(self):
         if not self.folder.get().strip():
             raise ValueError("Pick an image folder.")
+        if not self.repetitions.get().strip():
+            raise ValueError("Enter repetitions.")
+        try:
+            reps = int(self.repetitions.get())
+        except ValueError:
+            raise ValueError("Repetitions must be a positive integer.")
+        if reps < 1:
+            raise ValueError("Repetitions must be at least 1.")
+        self._reps = reps
         kw = {
             "folder": self.folder.get().strip(),
             "style": self.style.get(),
@@ -304,6 +324,38 @@ class CollageTab(RunnerTab):
         if self.bg.get().strip():
             kw["bg"] = self.bg.get().strip()
         return kw
+
+    def _make_target(self, kwargs):
+        reps = self._reps
+        user_output = kwargs.pop("output", None)
+
+        def target():
+            try:
+                last = None
+                for i in range(reps):
+                    if self.ctx.cancelled():
+                        break
+                    if reps > 1:
+                        self._push_log(f"\n=== Run {i + 1}/{reps} ===")
+                    run_kwargs = dict(kwargs)
+                    if user_output:
+                        if reps > 1:
+                            base, ext = os.path.splitext(user_output)
+                            run_kwargs["output"] = f"{base}_run{i + 1}{ext}"
+                        else:
+                            run_kwargs["output"] = user_output
+                    elif reps > 1:
+                        run_kwargs["seq"] = i + 1
+                    last = self.run_fn(**run_kwargs)
+                self.last_output = last
+            except RunCancelled:
+                self._push_log("[cancelled]")
+            except Exception as e:
+                self._push_log(f"[error] {e}")
+                self._push_log(traceback.format_exc())
+            finally:
+                self.log_queue.put(None)
+        return target
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +533,12 @@ class ReelTab(RunnerTab):
     def _build_form(self):
         self.folder = tk.StringVar()
         self.interval = tk.StringVar(value="2.0")
+        self.music_folder = tk.StringVar(
+            value="/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music"
+        )
+        self.beats_per_transition = tk.StringVar(value="4")
         self.output = tk.StringVar()
+        self.bg = tk.StringVar()
 
         grid = ttk.Frame(self)
         grid.pack(fill="x")
@@ -497,6 +554,26 @@ class ReelTab(RunnerTab):
 
         ttk.Label(grid, text="Interval per image (seconds)").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.interval, width=10).grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="Music folder (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.music_folder).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="Browse...",
+                   command=lambda: pick_dir(
+                       self.music_folder,
+                       self.music_folder.get() or os.path.expanduser("~"))
+                   ).grid(row=r, column=2)
+        r += 1
+
+        ttk.Label(grid, text="Beats per transition (0 = off)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.beats_per_transition, width=10
+                  ).grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="Background color hex (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.bg, width=12).grid(row=r, column=1, sticky="w", padx=4)
+        ttk.Button(grid, text="Pick color...",
+                   command=lambda: pick_color(self.bg)).grid(row=r, column=2)
         r += 1
 
         ttk.Label(grid, text="Output file (optional)").grid(row=r, column=0, sticky="w", pady=2)
@@ -526,6 +603,19 @@ class ReelTab(RunnerTab):
                 raise ValueError(f"Interval must be a number.")
         if self.output.get().strip():
             kw["output"] = self.output.get().strip()
+        if self.bg.get().strip():
+            kw["bg"] = self.bg.get().strip()
+        if self.music_folder.get().strip():
+            kw["music_folder"] = self.music_folder.get().strip()
+        if self.beats_per_transition.get().strip():
+            try:
+                bpt = int(self.beats_per_transition.get())
+            except ValueError:
+                raise ValueError("Beats per transition must be an integer.")
+            if bpt < 0:
+                raise ValueError("Beats per transition must be >= 0.")
+            if bpt > 0:
+                kw["beats_per_transition"] = bpt
         return kw
 
 
@@ -586,12 +676,161 @@ class CroppingTab(RunnerTab):
 
 
 # ---------------------------------------------------------------------------
+# Walls
+# ---------------------------------------------------------------------------
+
+class WallsTab(RunnerTab):
+    def __init__(self, master):
+        super().__init__(master, walls_mod.run,
+                         default_input_dir=PROJECT_ROOT)
+
+    def _build_form(self):
+        self.wall_folder = tk.StringVar(value=WALLS_DIR)
+        self.image_folder = tk.StringVar()
+        self.num_outputs = tk.StringVar(value="10")
+        self.output_dir = tk.StringVar()
+
+        grid = ttk.Frame(self)
+        grid.pack(fill="x")
+        grid.columnconfigure(1, weight=1)
+
+        r = 0
+        ttk.Label(grid, text="Wall folder").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.wall_folder).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="Browse...",
+                   command=lambda: pick_dir(self.wall_folder, self.default_input_dir)
+                   ).grid(row=r, column=2)
+        r += 1
+
+        ttk.Label(grid, text="Image folder").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.image_folder).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="Browse...",
+                   command=lambda: pick_dir(self.image_folder, self.default_input_dir)
+                   ).grid(row=r, column=2)
+        r += 1
+
+        ttk.Label(grid, text="Number of outputs").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.num_outputs, width=10).grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="Output folder (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.output_dir).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="Browse...",
+                   command=lambda: pick_dir(self.output_dir, OUTPUT_DIR)
+                   ).grid(row=r, column=2)
+        r += 1
+
+        ttk.Label(grid,
+                  text="(default output is a timestamped subfolder of output/)",
+                  foreground="gray").grid(row=r, column=0, columnspan=3, sticky="w")
+
+    def _gather_kwargs(self):
+        if not self.wall_folder.get().strip():
+            raise ValueError("Pick a wall folder.")
+        if not self.image_folder.get().strip():
+            raise ValueError("Pick an image folder.")
+        if not self.num_outputs.get().strip():
+            raise ValueError("Enter the number of outputs.")
+        try:
+            n = int(self.num_outputs.get())
+        except ValueError:
+            raise ValueError("Number of outputs must be an integer.")
+        if n < 1:
+            raise ValueError("Number of outputs must be at least 1.")
+        kw = {
+            "wall_folder": self.wall_folder.get().strip(),
+            "image_folder": self.image_folder.get().strip(),
+            "num_outputs": n,
+        }
+        if self.output_dir.get().strip():
+            kw["output_dir"] = self.output_dir.get().strip()
+        return kw
+
+
+# ---------------------------------------------------------------------------
+# Split
+# ---------------------------------------------------------------------------
+
+class SplitTab(RunnerTab):
+    def __init__(self, master):
+        super().__init__(master, split_mod.run,
+                         default_input_dir=PROJECT_ROOT)
+
+    def _build_form(self):
+        self.image = tk.StringVar()
+        self.aspect_ratio = tk.StringVar(value="9:16")
+        self.output_dir = tk.StringVar()
+        self.bg = tk.StringVar()
+
+        grid = ttk.Frame(self)
+        grid.pack(fill="x")
+        grid.columnconfigure(1, weight=1)
+
+        r = 0
+        ttk.Label(grid, text="Input image").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.image).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="Browse...", command=self._pick_input).grid(row=r, column=2)
+        r += 1
+
+        ttk.Label(grid, text="Aspect ratio").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Combobox(grid, textvariable=self.aspect_ratio,
+                     values=list(split_mod.ASPECT_RATIOS.keys()),
+                     state="readonly").grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="Output folder (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.output_dir).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="Browse...",
+                   command=lambda: pick_dir(self.output_dir, OUTPUT_DIR)
+                   ).grid(row=r, column=2)
+        r += 1
+
+        ttk.Label(grid, text="Padding color hex (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.bg, width=12).grid(row=r, column=1, sticky="w", padx=4)
+        ttk.Button(grid, text="Pick color...",
+                   command=lambda: pick_color(self.bg)).grid(row=r, column=2)
+        r += 1
+
+        ttk.Label(grid,
+                  text="(slides keep original height; width = height × aspect ratio. "
+                       "Padding is only used if input is narrower than one slide.)",
+                  foreground="gray").grid(row=r, column=0, columnspan=3, sticky="w")
+
+    def _pick_input(self):
+        current = self.image.get().strip()
+        if current and os.path.isfile(current):
+            initial_dir = os.path.dirname(current)
+        else:
+            initial_dir = current if current else self.default_input_dir
+        path = filedialog.askopenfilename(
+            initialdir=initial_dir,
+            filetypes=[("Image", "*.jpg *.jpeg *.png"), ("All files", "*.*")],
+            title="Pick a landscape photo",
+        )
+        if path:
+            self.image.set(path)
+
+    def _gather_kwargs(self):
+        if not self.image.get().strip():
+            raise ValueError("Pick an input image.")
+        kw = {
+            "image": self.image.get().strip(),
+            "aspect_ratio": self.aspect_ratio.get(),
+        }
+        if self.output_dir.get().strip():
+            kw["output_dir"] = self.output_dir.get().strip()
+        if self.bg.get().strip():
+            kw["bg"] = self.bg.get().strip()
+        return kw
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
     root = tk.Tk()
-    root.title("Image Tools")
+    root.title("Markus Voelter Photography - Photo Tools")
     root.geometry("900x680")
 
     nb = ttk.Notebook(root)
@@ -599,9 +838,11 @@ def main():
 
     nb.add(CollageTab(nb),     text="Collage")
     nb.add(RotateVideoTab(nb), text="Rotate Video")
-    nb.add(CarouselTab(nb),    text="Carousel")
-    nb.add(ReelTab(nb),        text="Reel")
+    nb.add(CarouselTab(nb),    text="Insta Carousel")
+    nb.add(ReelTab(nb),        text="Insta Reel")
     nb.add(CroppingTab(nb),    text="Cropping")
+    nb.add(WallsTab(nb),       text="Walls")
+    nb.add(SplitTab(nb),       text="Long Image Split")
 
     root.update_idletasks()
     root.lift()

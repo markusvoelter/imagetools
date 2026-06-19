@@ -8,6 +8,7 @@ PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(PACKAGE_DIR)
 ASSETS_DIR = os.path.join(PROJECT_ROOT, "assets")
 WATERMARKS_DIR = os.path.join(ASSETS_DIR, "watermarks")
+WALLS_DIR = os.path.join(ASSETS_DIR, "walls")
 DEFAULT_WATERMARK = os.path.join(WATERMARKS_DIR, "watermark.png")
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
 

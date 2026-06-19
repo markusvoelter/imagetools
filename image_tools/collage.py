@@ -936,7 +936,7 @@ def make_creative_collage(images, output_path, ctx, bg_color=DEFAULT_BG):
 # =========================================================================
 
 def auto_output_filename(folder, style, num_images, num_cols=None,
-                         aspect=None, count=None):
+                         aspect=None, count=None, seq=None):
     folder_name = os.path.basename(os.path.normpath(folder))
     parts = [folder_name, style, f"{num_images}imgs"]
     if style == "columns" and num_cols is not None:
@@ -947,11 +947,13 @@ def auto_output_filename(folder, style, num_images, num_cols=None,
         if count is not None:
             parts.append(f"{count}sel")
     parts.append(datetime.now().strftime("%Y%m%d_%H%M%S"))
+    if seq is not None:
+        parts.append(f"run{seq}")
     return "_".join(parts) + ".jpg"
 
 
 def run(*, folder, style="creative", output=None, num_cols=None,
-        aspect="16:9", count=None, bg=None, ctx=None):
+        aspect="16:9", count=None, bg=None, seq=None, ctx=None):
     """Generate a collage. Pure-Python; logs via ctx.log.
 
     folder        absolute path to folder containing .jpg images
@@ -987,7 +989,8 @@ def run(*, folder, style="creative", output=None, num_cols=None,
         output = os.path.join(
             OUTPUT_DIR,
             auto_output_filename(folder, style, len(images),
-                                 num_cols=num_cols, aspect=aspect, count=count),
+                                 num_cols=num_cols, aspect=aspect,
+                                 count=count, seq=seq),
         )
     else:
         output = os.path.abspath(output)
