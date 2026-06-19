@@ -537,6 +537,7 @@ class ReelTab(RunnerTab):
             value="/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music"
         )
         self.beats_per_transition = tk.StringVar(value="4")
+        self.end_screen = tk.StringVar(value=DEFAULT_WATERMARK)
         self.output = tk.StringVar()
         self.bg = tk.StringVar()
 
@@ -556,13 +557,17 @@ class ReelTab(RunnerTab):
         ttk.Entry(grid, textvariable=self.interval, width=10).grid(row=r, column=1, sticky="w", padx=4)
         r += 1
 
-        ttk.Label(grid, text="Music folder (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Label(grid, text="Music file or folder (optional)").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.music_folder).grid(row=r, column=1, sticky="ew", padx=4)
-        ttk.Button(grid, text="Browse...",
+        music_btns = ttk.Frame(grid)
+        music_btns.grid(row=r, column=2, sticky="w")
+        ttk.Button(music_btns, text="File...",
+                   command=self._pick_music_file).pack(side="left")
+        ttk.Button(music_btns, text="Folder...",
                    command=lambda: pick_dir(
                        self.music_folder,
                        self.music_folder.get() or os.path.expanduser("~"))
-                   ).grid(row=r, column=2)
+                   ).pack(side="left", padx=(4, 0))
         r += 1
 
         ttk.Label(grid, text="Beats per transition (0 = off)").grid(row=r, column=0, sticky="w", pady=2)
@@ -574,6 +579,12 @@ class ReelTab(RunnerTab):
         ttk.Entry(grid, textvariable=self.bg, width=12).grid(row=r, column=1, sticky="w", padx=4)
         ttk.Button(grid, text="Pick color...",
                    command=lambda: pick_color(self.bg)).grid(row=r, column=2)
+        r += 1
+
+        ttk.Label(grid, text="End screen image (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.end_screen).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="File...", command=self._pick_end_screen
+                   ).grid(row=r, column=2)
         r += 1
 
         ttk.Label(grid, text="Output file (optional)").grid(row=r, column=0, sticky="w", pady=2)
@@ -592,6 +603,37 @@ class ReelTab(RunnerTab):
         if path:
             self.output.set(path)
 
+    def _pick_end_screen(self):
+        current = self.end_screen.get().strip()
+        if current and os.path.isfile(current):
+            initial_dir = os.path.dirname(current)
+        else:
+            initial_dir = os.path.expanduser("~")
+        path = filedialog.askopenfilename(
+            initialdir=initial_dir,
+            filetypes=[("Image", "*.png *.jpg *.jpeg"), ("All files", "*.*")],
+            title="Pick an end screen image",
+        )
+        if path:
+            self.end_screen.set(path)
+
+    def _pick_music_file(self):
+        current = self.music_folder.get().strip()
+        if current and os.path.isfile(current):
+            initial_dir = os.path.dirname(current)
+        elif current and os.path.isdir(current):
+            initial_dir = current
+        else:
+            initial_dir = os.path.expanduser("~")
+        path = filedialog.askopenfilename(
+            initialdir=initial_dir,
+            filetypes=[("Audio", "*.mp3 *.m4a *.wav *.flac *.aac *.ogg *.opus"),
+                       ("All files", "*.*")],
+            title="Pick an audio file",
+        )
+        if path:
+            self.music_folder.set(path)
+
     def _gather_kwargs(self):
         if not self.folder.get().strip():
             raise ValueError("Pick an image folder.")
@@ -606,7 +648,9 @@ class ReelTab(RunnerTab):
         if self.bg.get().strip():
             kw["bg"] = self.bg.get().strip()
         if self.music_folder.get().strip():
-            kw["music_folder"] = self.music_folder.get().strip()
+            kw["music"] = self.music_folder.get().strip()
+        if self.end_screen.get().strip():
+            kw["end_screen"] = self.end_screen.get().strip()
         if self.beats_per_transition.get().strip():
             try:
                 bpt = int(self.beats_per_transition.get())

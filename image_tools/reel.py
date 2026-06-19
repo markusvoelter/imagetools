@@ -19,6 +19,8 @@ AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.wav', '.flac', '.aac', '.ogg', '.opus'}
 PADDING = 20
 MAX_CROP = 0.10
 DEFAULT_BG = (0, 0, 0)
+END_SCREEN_PADDING_FRAC = 0.08   # padding around the end-screen image (frac of width)
+END_SCREEN_HOLD_SECONDS = 3.0    # how long the end screen is held before video ends
 
 
 def load_image_paths(folder):
@@ -220,6 +222,27 @@ def render_swap_at(prev_slide, new_slide, swap_count, n, bg):
     return frame
 
 
+def _build_end_screen_frame(end_screen_path, bg_color):
+    """Compose the end-screen frame: bg color filling the canvas with the
+    user's image centered on top, padded, respecting transparency."""
+    frame = Image.new('RGB', (WIDTH, HEIGHT), bg_color)
+    img = Image.open(end_screen_path)
+    if img.mode != 'RGBA':
+        img = img.convert('RGBA')
+    pad = int(round(WIDTH * END_SCREEN_PADDING_FRAC))
+    avail_w = max(1, WIDTH - 2 * pad)
+    avail_h = max(1, HEIGHT - 2 * pad)
+    iw, ih = img.size
+    scale = min(avail_w / iw, avail_h / ih)
+    new_w = max(1, int(round(iw * scale)))
+    new_h = max(1, int(round(ih * scale)))
+    img = img.resize((new_w, new_h), Image.LANCZOS)
+    x = (WIDTH - new_w) // 2
+    y = (HEIGHT - new_h) // 2
+    frame.paste(img, (x, y), img)
+    return frame
+
+
 def _count_transitions(all_slides):
     """Total number of crossfade transitions, including the closing fade-out."""
     if not all_slides:
@@ -234,14 +257,16 @@ def _count_transitions(all_slides):
     return total
 
 
-def _iter_transitions(all_slides, bg_color):
+def _iter_transitions(all_slides, bg_color, end_screen_frame=None):
     """Yield (slide_idx, start_frame, end_frame) tuples for each transition.
 
     Encodes the same first-slide-build-up / same-layout-swap / layout-change
     semantics as before, but separated from the timing so rendering can be
-    driven externally by a schedule.
+    driven externally by a schedule. The closing fade targets `end_screen_frame`
+    when provided, otherwise the plain bg frame.
     """
     bg_frame = Image.new('RGB', (WIDTH, HEIGHT), bg_color)
+    closing_frame = end_screen_frame if end_screen_frame is not None else bg_frame
     prev_slide_imgs = None
     prev_n = 0
     n_slides = len(all_slides)
@@ -253,11 +278,12 @@ def _iter_transitions(all_slides, bg_color):
         same_layout = (prev_slide_imgs is not None and prev_n == n)
 
         if is_first:
-            for k in range(n):
-                start_frame = (bg_frame if k == 0
-                               else render_first_k_slots(slide_imgs, k, bg_color))
-                end_frame = render_first_k_slots(slide_imgs, k + 1, bg_color)
-                yield (slide_idx, start_frame, end_frame)
+            # First slide must be visible at frame 0 so it can act as the
+            # video's thumbnail. Emit n no-op "transitions" so beat-snap math
+            # and total duration stay unchanged but no build-up animation plays.
+            full_frame = render_first_k_slots(slide_imgs, n, bg_color)
+            for _ in range(n):
+                yield (slide_idx, full_frame, full_frame)
         elif same_layout:
             for slot_idx in range(n):
                 start_frame = render_swap_at(prev_slide_imgs, slide_imgs,
@@ -276,7 +302,7 @@ def _iter_transitions(all_slides, bg_color):
 
         if is_last:
             full_frame = render_first_k_slots(slide_imgs, n, bg_color)
-            yield (slide_idx, full_frame, bg_frame)
+            yield (slide_idx, full_frame, closing_frame)
 
         prev_slide_imgs = slide_imgs
         prev_n = n
@@ -334,34 +360,47 @@ def _compute_beat_schedule(audio_track, num_transitions, beats_per_transition,
     return schedule
 
 
-def _pick_audio_track(music_folder, ctx):
-    """Return absolute path to a randomly chosen audio file in music_folder,
-    or None if the folder is empty / has no audio files."""
-    music_folder = os.path.abspath(music_folder)
-    if not os.path.isdir(music_folder):
-        raise ValueError(f"Music folder not a directory: {music_folder}")
+def _resolve_audio_track(music_path, ctx):
+    """Return the audio file to use, or None if none is available.
+
+    If `music_path` is a file, it's used directly (with a sanity check on the
+    extension). If it's a folder, a random audio file inside is picked.
+    """
+    music_path = os.path.abspath(music_path)
+    if os.path.isfile(music_path):
+        ext = os.path.splitext(music_path)[1].lower()
+        if ext not in AUDIO_EXTENSIONS:
+            ctx.log(f"Warning: '{ext}' is not a known audio extension; "
+                    f"passing the file to ffmpeg anyway.")
+        return music_path
+    if not os.path.isdir(music_path):
+        raise ValueError(f"Music path not a file or folder: {music_path}")
     audio_files = []
     for ext in AUDIO_EXTENSIONS:
-        audio_files.extend(Path(music_folder).glob(f"*{ext}"))
-        audio_files.extend(Path(music_folder).glob(f"*{ext.upper()}"))
+        audio_files.extend(Path(music_path).glob(f"*{ext}"))
+        audio_files.extend(Path(music_path).glob(f"*{ext.upper()}"))
     audio_files = sorted(set(audio_files))
     if not audio_files:
-        ctx.log(f"No audio files in {music_folder}; video will be silent.")
+        ctx.log(f"No audio files in {music_path}; video will be silent.")
         return None
     return str(random.choice(audio_files))
 
 
 def run(*, folder, interval=DEFAULT_INTERVAL, output=None, bg=None,
-        music_folder=None, beats_per_transition=None, ctx=None):
+        music=None, beats_per_transition=None, end_screen=None, ctx=None):
     """Build the reel.
 
     folder                absolute path to the folder of source images
     interval              seconds per image transition (used when not beat-snapping)
     output                absolute output .mp4 path; auto in OUTPUT_DIR if None
     bg                    background color as "#rrggbb" hex; defaults to black
-    music_folder          if set, pick one audio file at random as background
+    music                 either an audio file (used directly) or a folder
+                          (random audio file inside is picked)
     beats_per_transition  if music is loaded and this is > 0, snap each fade
                           to land on every Nth beat (e.g. 4 = once per bar)
+    end_screen            optional path to an image (PNG with alpha works);
+                          shown centered on bg as the closing frame and held
+                          for END_SCREEN_HOLD_SECONDS before the video ends
     ctx                   RunContext
     """
     if ctx is None:
@@ -400,10 +439,18 @@ def run(*, folder, interval=DEFAULT_INTERVAL, output=None, bg=None,
     num_transitions = _count_transitions(all_slides)
 
     audio_track = None
-    if music_folder:
-        audio_track = _pick_audio_track(music_folder, ctx)
+    if music:
+        audio_track = _resolve_audio_track(music, ctx)
         if audio_track:
             ctx.log(f"Audio track: {audio_track}")
+
+    end_screen_frame = None
+    if end_screen:
+        end_screen = os.path.abspath(end_screen)
+        if not os.path.isfile(end_screen):
+            raise ValueError(f"End screen image not found: {end_screen}")
+        ctx.log(f"End screen: {end_screen}")
+        end_screen_frame = _build_end_screen_frame(end_screen, bg_color)
 
     schedule = None
     if audio_track and beats_per_transition and int(beats_per_transition) > 0:
@@ -420,6 +467,8 @@ def run(*, folder, interval=DEFAULT_INTERVAL, output=None, bg=None,
                 f"(fade {fade_seconds:.2f}s)")
 
     video_duration = schedule[-1] + fade_seconds if schedule else 0.0
+    if end_screen_frame is not None:
+        video_duration += END_SCREEN_HOLD_SECONDS
     ctx.log(f"Video duration: ~{video_duration:.2f}s")
 
     cmd = [
@@ -456,7 +505,7 @@ def run(*, folder, interval=DEFAULT_INTERVAL, output=None, bg=None,
     try:
         prev_fade_end_time = 0.0
         last_slide_logged = -1
-        transitions = _iter_transitions(all_slides, bg_color)
+        transitions = _iter_transitions(all_slides, bg_color, end_screen_frame)
         for i, (slide_idx, start_frame, end_frame) in enumerate(transitions):
             if ctx.cancelled():
                 break
@@ -485,6 +534,12 @@ def run(*, folder, interval=DEFAULT_INTERVAL, output=None, bg=None,
                 proc.stdin.write(frame.tobytes())
 
             prev_fade_end_time = fade_start_time + fade_dur
+
+        if end_screen_frame is not None and not ctx.cancelled():
+            hold_count = int(round(END_SCREEN_HOLD_SECONDS * FPS))
+            end_bytes = end_screen_frame.tobytes()
+            for _ in range(hold_count):
+                proc.stdin.write(end_bytes)
     except BrokenPipeError:
         pass
     finally:
