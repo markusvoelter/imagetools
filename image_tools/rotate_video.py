@@ -2,7 +2,9 @@
 
 import glob
 import os
+import random
 import subprocess
+from pathlib import Path
 
 from . import ASSETS_DIR, OUTPUT_DIR, RunContext, ensure_output_dir
 
@@ -17,8 +19,33 @@ TRANSITION_DURATION = 0.35
 CROSSFADE_DURATION = 0.2
 ENDSCREEN_DURATION = 5
 
+ROTATE_AUDIO_FADE_OUT_S = 1.5
+AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.wav', '.flac', '.aac', '.ogg', '.opus'}
+
 OVERLAY_PNG = os.path.join(ASSETS_DIR, "rotateoverlay.png")
 ENDSCREEN_PNG = os.path.join(ASSETS_DIR, "endscreen.png")
+
+
+def _resolve_audio_track(music_path, ctx):
+    """If music_path is a file, return it; if a folder, pick a random audio file."""
+    music_path = os.path.abspath(music_path)
+    if os.path.isfile(music_path):
+        ext = os.path.splitext(music_path)[1].lower()
+        if ext not in AUDIO_EXTENSIONS:
+            ctx.log(f"Warning: '{ext}' is not a known audio extension; "
+                    f"passing the file to ffmpeg anyway.")
+        return music_path
+    if not os.path.isdir(music_path):
+        raise ValueError(f"Music path not a file or folder: {music_path}")
+    audio_files = []
+    for ext in AUDIO_EXTENSIONS:
+        audio_files.extend(Path(music_path).glob(f"*{ext}"))
+        audio_files.extend(Path(music_path).glob(f"*{ext.upper()}"))
+    audio_files = sorted(set(audio_files))
+    if not audio_files:
+        ctx.log(f"No audio files in {music_path}; video will be silent.")
+        return None
+    return str(random.choice(audio_files))
 
 
 def find_images(folder, cover_filename):
@@ -44,7 +71,7 @@ def find_images(folder, cover_filename):
 
 
 def build_video(cover, horizontal_images, overlay, endscreen, output_path,
-                duration_horizontal, ctx):
+                duration_horizontal, ctx, audio_track=None):
     num_horizontal = len(horizontal_images)
     if num_horizontal == 1:
         per_image_dur = duration_horizontal
@@ -67,6 +94,10 @@ def build_video(cover, horizontal_images, overlay, endscreen, output_path,
         inputs += ["-loop", "1", "-t", str(per_image_dur), "-i", img]
     endscreen_idx = 2 + num_horizontal
     inputs += ["-loop", "1", "-t", str(ENDSCREEN_DURATION), "-i", endscreen]
+    audio_input_idx = None
+    if audio_track:
+        audio_input_idx = endscreen_idx + 1
+        inputs += ["-i", audio_track]
 
     filters = []
     filters.append(
@@ -123,11 +154,24 @@ def build_video(cover, horizontal_images, overlay, endscreen, output_path,
 
     filter_complex = ";".join(filters)
 
+    # Total video length: cover + horizontal section + endscreen (one crossfade overlap).
+    total_video_s = DURATION_IMAGE1 + duration_horizontal + ENDSCREEN_DURATION - CROSSFADE_DURATION
+
     cmd = [
         "ffmpeg", "-y",
         *inputs,
         "-filter_complex", filter_complex,
         "-map", "[out]",
+    ]
+    if audio_input_idx is not None:
+        audio_fade_start = max(0.0, total_video_s - ROTATE_AUDIO_FADE_OUT_S)
+        cmd += [
+            "-map", f"{audio_input_idx}:a",
+            "-c:a", "aac", "-b:a", "192k",
+            "-af", f"afade=t=out:st={audio_fade_start:.3f}:d={ROTATE_AUDIO_FADE_OUT_S:.3f}",
+            "-shortest",
+        ]
+    cmd += [
         "-c:v", "libx264",
         "-profile:v", "high",
         "-pix_fmt", "yuv420p",
@@ -152,13 +196,16 @@ def build_video(cover, horizontal_images, overlay, endscreen, output_path,
     ctx.log(f"Video saved to: {output_path}")
 
 
-def run(*, folder, total_duration_seconds, cover_image, output=None, ctx=None):
+def run(*, folder, total_duration_seconds, cover_image, output=None,
+        music=None, ctx=None):
     """Build the rotate video.
 
     folder                   absolute path containing horizontal images + cover
     total_duration_seconds   total length; cover takes 3s, rest is horizontals
     cover_image              filename (relative to folder) of the 9:16 cover
     output                   absolute output .mp4 path; auto in OUTPUT_DIR if None
+    music                    either an audio file (used directly) or a folder
+                             (random audio file inside is picked)
     ctx                      RunContext
     """
     if ctx is None:
@@ -195,6 +242,12 @@ def run(*, folder, total_duration_seconds, cover_image, output=None, ctx=None):
         output = os.path.abspath(output)
         os.makedirs(os.path.dirname(output), exist_ok=True)
 
+    audio_track = None
+    if music:
+        audio_track = _resolve_audio_track(music, ctx)
+        if audio_track:
+            ctx.log(f"Audio track: {audio_track}")
+
     build_video(cover, horizontal, OVERLAY_PNG, ENDSCREEN_PNG,
-                output, duration_horizontal, ctx)
+                output, duration_horizontal, ctx, audio_track=audio_track)
     return output

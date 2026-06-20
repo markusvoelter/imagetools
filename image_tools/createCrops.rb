@@ -2,7 +2,9 @@
 require 'mini_magick'
 
 # ===== Configuration =====
-WATERMARK_PATH  = ARGV[1] || "watermark.png" # absolute path passed as 2nd arg
+# Absolute watermark path passed as 2nd arg. If missing or empty, watermarking
+# is disabled for every ratio (even those flagged use_watermark: true).
+WATERMARK_PATH  = (ARGV[1].to_s.empty?) ? nil : ARGV[1]
 WATERMARK_ALPHA = 0.85            # Transparency: 0.0 (invisible) → 1.0 (opaque)
 
 RATIOS = {
@@ -78,8 +80,8 @@ def process_variant(original_image_path, output_path, crop_width, crop_height, o
 
   puts "#{original_image_path} cropping to #{crop_width}x#{crop_height}+#{offset_x}+#{offset_y}"
 
-  # Watermark
-  if use_watermark
+  # Watermark (skipped when no watermark path was supplied)
+  if use_watermark && WATERMARK_PATH
     watermark = MiniMagick::Image.open(WATERMARK_PATH)
     wm_target_width = (img.width * watermark_ratio).round
     watermark.resize("#{wm_target_width}x")
@@ -91,7 +93,7 @@ def process_variant(original_image_path, output_path, crop_width, crop_height, o
       c.gravity "SouthEast"
       c.geometry "+5+5"
     end
-  end 
+  end
 
   # Resize
   if img.width >= img.height

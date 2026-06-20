@@ -372,6 +372,9 @@ class RotateVideoTab(RunnerTab):
         self.folder = tk.StringVar()
         self.duration = tk.StringVar(value="15")
         self.cover = tk.StringVar()
+        self.music = tk.StringVar(
+            value="/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music"
+        )
         self.output = tk.StringVar()
 
         grid = ttk.Frame(self)
@@ -396,6 +399,19 @@ class RotateVideoTab(RunnerTab):
                    ).grid(row=r, column=2)
         r += 1
 
+        ttk.Label(grid, text="Music file or folder (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.music).grid(row=r, column=1, sticky="ew", padx=4)
+        music_btns = ttk.Frame(grid)
+        music_btns.grid(row=r, column=2, sticky="w")
+        ttk.Button(music_btns, text="File...",
+                   command=self._pick_music_file).pack(side="left")
+        ttk.Button(music_btns, text="Folder...",
+                   command=lambda: pick_dir(
+                       self.music,
+                       self.music.get() or os.path.expanduser("~"))
+                   ).pack(side="left", padx=(4, 0))
+        r += 1
+
         ttk.Label(grid, text="Output file (optional)").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.output).grid(row=r, column=1, sticky="ew", padx=4)
         ttk.Button(grid, text="Save as...", command=self._pick_output
@@ -404,6 +420,23 @@ class RotateVideoTab(RunnerTab):
 
         ttk.Label(grid, text="(cover must be inside the chosen image folder)",
                   foreground="gray").grid(row=r, column=0, columnspan=3, sticky="w")
+
+    def _pick_music_file(self):
+        current = self.music.get().strip()
+        if current and os.path.isfile(current):
+            initial_dir = os.path.dirname(current)
+        elif current and os.path.isdir(current):
+            initial_dir = current
+        else:
+            initial_dir = os.path.expanduser("~")
+        path = filedialog.askopenfilename(
+            initialdir=initial_dir,
+            filetypes=[("Audio", "*.mp3 *.m4a *.wav *.flac *.aac *.ogg *.opus"),
+                       ("All files", "*.*")],
+            title="Pick an audio file",
+        )
+        if path:
+            self.music.set(path)
 
     def _pick_cover(self):
         initial = self.folder.get() or self.default_input_dir
@@ -453,6 +486,8 @@ class RotateVideoTab(RunnerTab):
         }
         if self.output.get().strip():
             kw["output"] = self.output.get().strip()
+        if self.music.get().strip():
+            kw["music"] = self.music.get().strip()
         return kw
 
 

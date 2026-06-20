@@ -4,7 +4,7 @@ import os
 import shutil
 import subprocess
 
-from . import DEFAULT_WATERMARK, PACKAGE_DIR, RunContext
+from . import PACKAGE_DIR, RunContext
 
 
 SCRIPT_PATH = os.path.join(PACKAGE_DIR, "createCrops.rb")
@@ -14,8 +14,9 @@ def run(*, folder, watermark=None, ctx=None):
     """Generate cropped variants for every image in `folder`.
 
     The Ruby script writes results to `_cropped_<ratio>/` subfolders inside
-    `folder`. The watermark (used for 16:9 crops) is passed as an absolute
-    path to the Ruby script. Defaults to assets/watermarks/watermark.png.
+    `folder`. If `watermark` is a path it is passed to the Ruby script and used
+    on 16:9 crops; if it's None or an empty string, no watermark is applied
+    (the 16:9 outputs are produced without one).
 
     Returns the absolute input folder so the UI can reveal it.
     """
@@ -26,11 +27,14 @@ def run(*, folder, watermark=None, ctx=None):
     if not os.path.isdir(folder):
         raise ValueError(f"Not a directory: {folder}")
 
-    if watermark is None:
-        watermark = DEFAULT_WATERMARK
-    watermark = os.path.abspath(watermark)
-    if not os.path.isfile(watermark):
-        raise FileNotFoundError(f"Watermark not found: {watermark}")
+    if watermark is not None and watermark.strip():
+        watermark = os.path.abspath(watermark)
+        if not os.path.isfile(watermark):
+            raise FileNotFoundError(f"Watermark not found: {watermark}")
+        ctx.log(f"Watermark: {watermark}")
+    else:
+        watermark = None
+        ctx.log("No watermark — 16:9 crops will be produced without one.")
 
     if not os.path.isfile(SCRIPT_PATH):
         raise FileNotFoundError(f"createCrops.rb not found at {SCRIPT_PATH}")
@@ -41,7 +45,7 @@ def run(*, folder, watermark=None, ctx=None):
             "ruby not found on PATH. Install ruby and the mini_magick gem."
         )
 
-    cmd = [ruby, SCRIPT_PATH, folder, watermark]
+    cmd = [ruby, SCRIPT_PATH, folder, watermark if watermark else ""]
     ctx.log(f"$ cd {PACKAGE_DIR}")
     ctx.log(f"$ {' '.join(cmd)}\n")
 
