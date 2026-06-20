@@ -469,6 +469,14 @@ class CarouselTab(RunnerTab):
         self.num_slides = tk.StringVar(value="20")
         self.aspect = tk.StringVar(value="9:16")
         self.output_dir = tk.StringVar()
+        self.create_video = tk.BooleanVar(value=False)
+        self.scroll_mode = tk.StringVar(value="Continuous pan")
+        self.scroll_speed_pct = tk.StringVar(value="200")
+        self.stepped_hold_s = tk.StringVar(value="2.0")
+        self.music = tk.StringVar(
+            value="/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music"
+        )
+        self.end_screen = tk.StringVar(value=DEFAULT_WATERMARK)
 
         grid = ttk.Frame(self)
         grid.pack(fill="x")
@@ -499,6 +507,46 @@ class CarouselTab(RunnerTab):
                    ).grid(row=r, column=2)
         r += 1
 
+        ttk.Checkbutton(grid, text="Also create scroll video (mp4)",
+                        variable=self.create_video
+                        ).grid(row=r, column=0, columnspan=3, sticky="w", pady=2)
+        r += 1
+
+        ttk.Label(grid, text="Scroll mode").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Combobox(grid, textvariable=self.scroll_mode,
+                     values=["Continuous pan", "Hold each slide"],
+                     state="readonly").grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="Hold per slide (s, stepped only)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.stepped_hold_s, width=10
+                  ).grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="Scroll speed %").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.scroll_speed_pct, width=10
+                  ).grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="Music file or folder (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.music).grid(row=r, column=1, sticky="ew", padx=4)
+        music_btns = ttk.Frame(grid)
+        music_btns.grid(row=r, column=2, sticky="w")
+        ttk.Button(music_btns, text="File...",
+                   command=self._pick_music_file).pack(side="left")
+        ttk.Button(music_btns, text="Folder...",
+                   command=lambda: pick_dir(
+                       self.music,
+                       self.music.get() or os.path.expanduser("~"))
+                   ).pack(side="left", padx=(4, 0))
+        r += 1
+
+        ttk.Label(grid, text="End screen image (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.end_screen).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="File...", command=self._pick_end_screen
+                   ).grid(row=r, column=2)
+        r += 1
+
         ttk.Label(grid, text="(default output is a sibling folder named <input>-swipey)",
                   foreground="gray").grid(row=r, column=0, columnspan=3, sticky="w")
 
@@ -518,7 +566,66 @@ class CarouselTab(RunnerTab):
         }
         if self.output_dir.get().strip():
             kw["output_dir"] = self.output_dir.get().strip()
+        if self.create_video.get():
+            kw["create_video"] = True
+            mode_map = {
+                "Continuous pan": carousel_mod.MODE_CONTINUOUS,
+                "Hold each slide": carousel_mod.MODE_STEPPED,
+            }
+            kw["scroll_mode"] = mode_map.get(self.scroll_mode.get(),
+                                             carousel_mod.MODE_CONTINUOUS)
+            if self.stepped_hold_s.get().strip():
+                try:
+                    hold = float(self.stepped_hold_s.get())
+                except ValueError:
+                    raise ValueError("Hold per slide must be a number.")
+                if hold <= 0:
+                    raise ValueError("Hold per slide must be > 0.")
+                kw["stepped_hold_s"] = hold
+            if self.scroll_speed_pct.get().strip():
+                try:
+                    pct = float(self.scroll_speed_pct.get())
+                except ValueError:
+                    raise ValueError("Scroll speed % must be a number.")
+                if pct <= 0:
+                    raise ValueError("Scroll speed % must be > 0.")
+                kw["scroll_speed_pct"] = pct
+            if self.music.get().strip():
+                kw["music"] = self.music.get().strip()
+            if self.end_screen.get().strip():
+                kw["end_screen"] = self.end_screen.get().strip()
         return kw
+
+    def _pick_end_screen(self):
+        current = self.end_screen.get().strip()
+        if current and os.path.isfile(current):
+            initial_dir = os.path.dirname(current)
+        else:
+            initial_dir = WATERMARKS_DIR
+        path = filedialog.askopenfilename(
+            initialdir=initial_dir,
+            filetypes=[("Image", "*.png *.jpg *.jpeg"), ("All files", "*.*")],
+            title="Pick an end screen image",
+        )
+        if path:
+            self.end_screen.set(path)
+
+    def _pick_music_file(self):
+        current = self.music.get().strip()
+        if current and os.path.isfile(current):
+            initial_dir = os.path.dirname(current)
+        elif current and os.path.isdir(current):
+            initial_dir = current
+        else:
+            initial_dir = os.path.expanduser("~")
+        path = filedialog.askopenfilename(
+            initialdir=initial_dir,
+            filetypes=[("Audio", "*.mp3 *.m4a *.wav *.flac *.aac *.ogg *.opus"),
+                       ("All files", "*.*")],
+            title="Pick an audio file",
+        )
+        if path:
+            self.music.set(path)
 
 
 # ---------------------------------------------------------------------------
