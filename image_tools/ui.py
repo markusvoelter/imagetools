@@ -24,6 +24,7 @@ from . import collage as collage_mod
 from . import cropping as cropping_mod
 from . import reel as reel_mod
 from . import rotate_video as rotate_video_mod
+from . import scroll_video as scroll_video_mod
 from . import split as split_mod
 from . import walls as walls_mod
 
@@ -469,14 +470,6 @@ class CarouselTab(RunnerTab):
         self.num_slides = tk.StringVar(value="20")
         self.aspect = tk.StringVar(value="9:16")
         self.output_dir = tk.StringVar()
-        self.create_video = tk.BooleanVar(value=False)
-        self.scroll_mode = tk.StringVar(value="Continuous pan")
-        self.scroll_speed_pct = tk.StringVar(value="200")
-        self.stepped_hold_s = tk.StringVar(value="2.0")
-        self.music = tk.StringVar(
-            value="/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music"
-        )
-        self.end_screen = tk.StringVar(value=DEFAULT_WATERMARK)
 
         grid = ttk.Frame(self)
         grid.pack(fill="x")
@@ -507,9 +500,65 @@ class CarouselTab(RunnerTab):
                    ).grid(row=r, column=2)
         r += 1
 
-        ttk.Checkbutton(grid, text="Also create scroll video (mp4)",
-                        variable=self.create_video
-                        ).grid(row=r, column=0, columnspan=3, sticky="w", pady=2)
+        ttk.Label(grid, text="(default output is a sibling folder named <input>-swipey)",
+                  foreground="gray").grid(row=r, column=0, columnspan=3, sticky="w")
+
+    def _gather_kwargs(self):
+        if not self.folder.get().strip():
+            raise ValueError("Pick an image folder.")
+        if not self.num_slides.get().strip():
+            raise ValueError("Enter the number of slides.")
+        try:
+            n = int(self.num_slides.get())
+        except ValueError:
+            raise ValueError("Number of slides must be an integer.")
+        kw = {
+            "folder": self.folder.get().strip(),
+            "num_slides": n,
+            "aspect_ratio": self.aspect.get(),
+        }
+        if self.output_dir.get().strip():
+            kw["output_dir"] = self.output_dir.get().strip()
+        return kw
+
+
+# ---------------------------------------------------------------------------
+# Scroll Video
+# ---------------------------------------------------------------------------
+
+class ScrollVideoTab(RunnerTab):
+    def __init__(self, master):
+        super().__init__(master, scroll_video_mod.run,
+                         default_input_dir=os.path.join(PROJECT_ROOT, "imagesSwipeys2"))
+
+    def _build_form(self):
+        self.folder = tk.StringVar()
+        self.aspect = tk.StringVar(value="9:16")
+        self.output = tk.StringVar()
+        self.scroll_mode = tk.StringVar(value="Continuous pan")
+        self.stepped_hold_s = tk.StringVar(value="2.0")
+        self.scroll_speed_pct = tk.StringVar(value="200")
+        self.music = tk.StringVar(
+            value="/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music"
+        )
+        self.end_screen = tk.StringVar(value=DEFAULT_WATERMARK)
+
+        grid = ttk.Frame(self)
+        grid.pack(fill="x")
+        grid.columnconfigure(1, weight=1)
+
+        r = 0
+        ttk.Label(grid, text="Image folder").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.folder).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="Browse...",
+                   command=lambda: pick_dir(self.folder, self.default_input_dir)
+                   ).grid(row=r, column=2)
+        r += 1
+
+        ttk.Label(grid, text="Aspect ratio").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Combobox(grid, textvariable=self.aspect,
+                     values=list(scroll_video_mod.ASPECT_RATIOS.keys()),
+                     state="readonly").grid(row=r, column=1, sticky="w", padx=4)
         r += 1
 
         ttk.Label(grid, text="Scroll mode").grid(row=r, column=0, sticky="w", pady=2)
@@ -547,54 +596,21 @@ class CarouselTab(RunnerTab):
                    ).grid(row=r, column=2)
         r += 1
 
-        ttk.Label(grid, text="(default output is a sibling folder named <input>-swipey)",
-                  foreground="gray").grid(row=r, column=0, columnspan=3, sticky="w")
+        ttk.Label(grid, text="Output file (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.output).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="Save as...", command=self._pick_output
+                   ).grid(row=r, column=2)
+        r += 1
 
-    def _gather_kwargs(self):
-        if not self.folder.get().strip():
-            raise ValueError("Pick an image folder.")
-        if not self.num_slides.get().strip():
-            raise ValueError("Enter the number of slides.")
-        try:
-            n = int(self.num_slides.get())
-        except ValueError:
-            raise ValueError(f"Number of slides must be an integer.")
-        kw = {
-            "folder": self.folder.get().strip(),
-            "num_slides": n,
-            "aspect_ratio": self.aspect.get(),
-        }
-        if self.output_dir.get().strip():
-            kw["output_dir"] = self.output_dir.get().strip()
-        if self.create_video.get():
-            kw["create_video"] = True
-            mode_map = {
-                "Continuous pan": carousel_mod.MODE_CONTINUOUS,
-                "Hold each slide": carousel_mod.MODE_STEPPED,
-            }
-            kw["scroll_mode"] = mode_map.get(self.scroll_mode.get(),
-                                             carousel_mod.MODE_CONTINUOUS)
-            if self.stepped_hold_s.get().strip():
-                try:
-                    hold = float(self.stepped_hold_s.get())
-                except ValueError:
-                    raise ValueError("Hold per slide must be a number.")
-                if hold <= 0:
-                    raise ValueError("Hold per slide must be > 0.")
-                kw["stepped_hold_s"] = hold
-            if self.scroll_speed_pct.get().strip():
-                try:
-                    pct = float(self.scroll_speed_pct.get())
-                except ValueError:
-                    raise ValueError("Scroll speed % must be a number.")
-                if pct <= 0:
-                    raise ValueError("Scroll speed % must be > 0.")
-                kw["scroll_speed_pct"] = pct
-            if self.music.get().strip():
-                kw["music"] = self.music.get().strip()
-            if self.end_screen.get().strip():
-                kw["end_screen"] = self.end_screen.get().strip()
-        return kw
+    def _pick_output(self):
+        ensure_output_dir()
+        path = filedialog.asksaveasfilename(
+            defaultextension=".mp4",
+            filetypes=[("MP4", "*.mp4"), ("All files", "*.*")],
+            initialdir=OUTPUT_DIR,
+        )
+        if path:
+            self.output.set(path)
 
     def _pick_end_screen(self):
         current = self.end_screen.get().strip()
@@ -626,6 +642,43 @@ class CarouselTab(RunnerTab):
         )
         if path:
             self.music.set(path)
+
+    def _gather_kwargs(self):
+        if not self.folder.get().strip():
+            raise ValueError("Pick an image folder.")
+        mode_map = {
+            "Continuous pan": scroll_video_mod.MODE_CONTINUOUS,
+            "Hold each slide": scroll_video_mod.MODE_STEPPED,
+        }
+        kw = {
+            "folder": self.folder.get().strip(),
+            "aspect_ratio": self.aspect.get(),
+            "scroll_mode": mode_map.get(self.scroll_mode.get(),
+                                        scroll_video_mod.MODE_CONTINUOUS),
+        }
+        if self.stepped_hold_s.get().strip():
+            try:
+                hold = float(self.stepped_hold_s.get())
+            except ValueError:
+                raise ValueError("Hold per slide must be a number.")
+            if hold <= 0:
+                raise ValueError("Hold per slide must be > 0.")
+            kw["stepped_hold_s"] = hold
+        if self.scroll_speed_pct.get().strip():
+            try:
+                pct = float(self.scroll_speed_pct.get())
+            except ValueError:
+                raise ValueError("Scroll speed % must be a number.")
+            if pct <= 0:
+                raise ValueError("Scroll speed % must be > 0.")
+            kw["scroll_speed_pct"] = pct
+        if self.music.get().strip():
+            kw["music"] = self.music.get().strip()
+        if self.end_screen.get().strip():
+            kw["end_screen"] = self.end_screen.get().strip()
+        if self.output.get().strip():
+            kw["output"] = self.output.get().strip()
+        return kw
 
 
 # ---------------------------------------------------------------------------
@@ -990,6 +1043,7 @@ def main():
     nb.add(CollageTab(nb),     text="Collage")
     nb.add(RotateVideoTab(nb), text="Rotate Video")
     nb.add(CarouselTab(nb),    text="Insta Carousel")
+    nb.add(ScrollVideoTab(nb), text="Scroll Video")
     nb.add(ReelTab(nb),        text="Insta Reel")
     nb.add(CroppingTab(nb),    text="Cropping")
     nb.add(WallsTab(nb),       text="Walls")
