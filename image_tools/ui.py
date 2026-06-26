@@ -22,6 +22,7 @@ from . import (
 from . import carousel as carousel_mod
 from . import collage as collage_mod
 from . import cropping as cropping_mod
+from . import ken_burns as ken_burns_mod
 from . import reel as reel_mod
 from . import rotate_video as rotate_video_mod
 from . import scroll_video as scroll_video_mod
@@ -1064,6 +1065,146 @@ class SplitTab(RunnerTab):
 
 
 # ---------------------------------------------------------------------------
+# Ken Burns
+# ---------------------------------------------------------------------------
+
+class KenBurnsTab(RunnerTab):
+    def __init__(self, master):
+        super().__init__(master, ken_burns_mod.run,
+                         default_input_dir=PROJECT_ROOT)
+
+    def _build_form(self):
+        self.folder = tk.StringVar()
+        self.num_images = tk.StringVar(value="20")
+        self.aspect = tk.StringVar(value="16:9")
+        self.duration = tk.StringVar(value="4.0")
+        self.kb_strength_pct = tk.StringVar(value="50")
+        self.music = tk.StringVar(
+            value="/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music"
+        )
+        self.output = tk.StringVar()
+
+        grid = ttk.Frame(self)
+        grid.pack(fill="x")
+        grid.columnconfigure(1, weight=1)
+
+        r = 0
+        ttk.Label(grid, text="Image folder").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.folder).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="Browse...",
+                   command=lambda: pick_dir(self.folder, self.default_input_dir)
+                   ).grid(row=r, column=2)
+        r += 1
+
+        ttk.Label(grid, text="Number of images").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.num_images, width=10
+                  ).grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="Aspect ratio").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Combobox(grid, textvariable=self.aspect,
+                     values=list(ken_burns_mod.ASPECTS.keys()),
+                     state="readonly").grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="Duration per image (s)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.duration, width=10
+                  ).grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="Ken Burns strength %").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.kb_strength_pct, width=10
+                  ).grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="Music file or folder (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.music).grid(row=r, column=1, sticky="ew", padx=4)
+        music_btns = ttk.Frame(grid)
+        music_btns.grid(row=r, column=2, sticky="w")
+        ttk.Button(music_btns, text="File...",
+                   command=self._pick_music_file).pack(side="left")
+        ttk.Button(music_btns, text="Folder...",
+                   command=lambda: pick_dir(
+                       self.music,
+                       self.music.get() or os.path.expanduser("~"))
+                   ).pack(side="left", padx=(4, 0))
+        r += 1
+
+        ttk.Label(grid, text="Output file (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.output).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="Save as...", command=self._pick_output
+                   ).grid(row=r, column=2)
+        r += 1
+
+        ttk.Label(grid,
+                  text="(16:9 picks landscape images, 9:16 picks portrait. "
+                       "Bars are filled with a heavy blur of the same image.)",
+                  foreground="gray").grid(row=r, column=0, columnspan=3, sticky="w")
+
+    def _pick_output(self):
+        ensure_output_dir()
+        path = filedialog.asksaveasfilename(
+            defaultextension=".mp4",
+            filetypes=[("MP4", "*.mp4"), ("All files", "*.*")],
+            initialdir=OUTPUT_DIR,
+        )
+        if path:
+            self.output.set(path)
+
+    def _pick_music_file(self):
+        current = self.music.get().strip()
+        if current and os.path.isfile(current):
+            initial_dir = os.path.dirname(current)
+        elif current and os.path.isdir(current):
+            initial_dir = current
+        else:
+            initial_dir = os.path.expanduser("~")
+        path = filedialog.askopenfilename(
+            initialdir=initial_dir,
+            filetypes=[("Audio", "*.mp3 *.m4a *.wav *.flac *.aac *.ogg *.opus"),
+                       ("All files", "*.*")],
+            title="Pick an audio file",
+        )
+        if path:
+            self.music.set(path)
+
+    def _gather_kwargs(self):
+        if not self.folder.get().strip():
+            raise ValueError("Pick an image folder.")
+        try:
+            n = int(self.num_images.get())
+        except ValueError:
+            raise ValueError("Number of images must be an integer.")
+        if n < 1:
+            raise ValueError("Number of images must be >= 1.")
+        try:
+            dur = float(self.duration.get())
+        except ValueError:
+            raise ValueError("Duration per image must be a number.")
+        if dur <= 0:
+            raise ValueError("Duration per image must be > 0.")
+        try:
+            pct = float(self.kb_strength_pct.get())
+        except ValueError:
+            raise ValueError("Ken Burns strength must be a number.")
+        if pct < 0 or pct > 100:
+            raise ValueError("Ken Burns strength must be in 0..100.")
+
+        kw = {
+            "folder": self.folder.get().strip(),
+            "num_images": n,
+            "aspect": self.aspect.get(),
+            "duration_per_image": dur,
+            "kb_strength": pct / 100.0,
+        }
+        if self.music.get().strip():
+            kw["music"] = self.music.get().strip()
+        if self.output.get().strip():
+            kw["output"] = self.output.get().strip()
+        return kw
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1080,6 +1221,7 @@ def main():
     nb.add(CarouselTab(nb),    text="Insta Carousel")
     nb.add(ScrollVideoTab(nb), text="Scroll Video")
     nb.add(ReelTab(nb),        text="Insta Reel")
+    nb.add(KenBurnsTab(nb),    text="Ken Burns")
     nb.add(CroppingTab(nb),    text="Cropping")
     nb.add(WallsTab(nb),       text="Walls")
     nb.add(SplitTab(nb),       text="Long Image Split")
