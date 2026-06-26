@@ -1,5 +1,6 @@
 """Tkinter UI for the image-tools package."""
 
+import json
 import os
 import queue
 import subprocess
@@ -7,6 +8,7 @@ import sys
 import threading
 import tkinter as tk
 import traceback
+from pathlib import Path
 from tkinter import colorchooser, filedialog, ttk
 
 from . import (
@@ -78,11 +80,56 @@ def reveal_output(path):
 
 
 # ---------------------------------------------------------------------------
+# Persistent field state
+# ---------------------------------------------------------------------------
+
+_STATE_PATH = Path.cwd() / ".image_tools_ui_state.json"
+
+
+class _PersistentStore:
+    """JSON-backed key/value store. Persisted automatically on each set()."""
+
+    def __init__(self, path):
+        self.path = path
+        self.data = {}
+        try:
+            with open(self.path) as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                self.data = loaded
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
+
+    def get(self, key, default):
+        return self.data.get(key, default)
+
+    def set(self, key, value):
+        if self.data.get(key) == value:
+            return
+        self.data[key] = value
+        try:
+            with open(self.path, "w") as f:
+                json.dump(self.data, f, indent=2, sort_keys=True)
+        except OSError:
+            pass
+
+
+_store = _PersistentStore(_STATE_PATH)
+
+
+# ---------------------------------------------------------------------------
 # Base tab
 # ---------------------------------------------------------------------------
 
 class RunnerTab(ttk.Frame):
-    """Base tab that runs a tool function in a background thread."""
+    """Base tab that runs a tool function in a background thread.
+
+    Subclasses set `persist_prefix` to a unique string; `self.pvar(name, ...)`
+    then creates a `tk.Variable` whose value is loaded from the JSON store on
+    creation and saved back on every change.
+    """
+
+    persist_prefix = None  # subclasses override
 
     def __init__(self, master, run_fn, default_input_dir=None):
         super().__init__(master, padding=10)
@@ -95,6 +142,27 @@ class RunnerTab(ttk.Frame):
         self._build_form()
         self._build_log()
         self.after(80, self._drain_log)
+
+    def pvar(self, name, default, var_class=tk.StringVar):
+        """Return a tk.Variable bound to the global JSON store.
+
+        The store key is f"{self.persist_prefix}.{name}". If `persist_prefix`
+        is None (e.g. for a tab that opts out), the variable is created with
+        the supplied default and no persistence wiring.
+        """
+        if self.persist_prefix is None:
+            return var_class(value=default)
+        key = f"{self.persist_prefix}.{name}"
+        stored = _store.get(key, default)
+        # Coerce JSON-decoded values back to the var class' expected type so
+        # tk doesn't choke on e.g. a stored int going into a StringVar.
+        if var_class is tk.StringVar and not isinstance(stored, str):
+            stored = "" if stored is None else str(stored)
+        elif var_class is tk.BooleanVar and not isinstance(stored, bool):
+            stored = bool(stored)
+        var = var_class(value=stored)
+        var.trace_add("write", lambda *a: _store.set(key, var.get()))
+        return var
 
     # to be overridden
     def _build_form(self):
@@ -220,19 +288,21 @@ class RunnerTab(ttk.Frame):
 # ---------------------------------------------------------------------------
 
 class CollageTab(RunnerTab):
+    persist_prefix = "collage"
+
     def __init__(self, master):
         super().__init__(master, collage_mod.run,
                          default_input_dir=os.path.join(PROJECT_ROOT, "imageCollage"))
 
     def _build_form(self):
-        self.folder = tk.StringVar()
-        self.style = tk.StringVar(value="mosaic")
-        self.repetitions = tk.StringVar(value="5")
-        self.output = tk.StringVar()
-        self.num_cols = tk.StringVar()
-        self.aspect = tk.StringVar(value="16:9")
-        self.count = tk.StringVar()
-        self.bg = tk.StringVar()
+        self.folder = self.pvar("folder", "")
+        self.style = self.pvar("style", "mosaic")
+        self.repetitions = self.pvar("repetitions", "5")
+        self.output = self.pvar("output", "")
+        self.num_cols = self.pvar("num_cols", "")
+        self.aspect = self.pvar("aspect", "16:9")
+        self.count = self.pvar("count", "")
+        self.bg = self.pvar("bg", "")
 
         grid = ttk.Frame(self)
         grid.pack(fill="x")
@@ -365,18 +435,21 @@ class CollageTab(RunnerTab):
 # ---------------------------------------------------------------------------
 
 class RotateVideoTab(RunnerTab):
+    persist_prefix = "rotate_video"
+
     def __init__(self, master):
         super().__init__(master, rotate_video_mod.run,
                          default_input_dir=os.path.join(PROJECT_ROOT, "imageRotateVideo"))
 
     def _build_form(self):
-        self.folder = tk.StringVar()
-        self.duration = tk.StringVar(value="15")
-        self.cover = tk.StringVar()
-        self.music = tk.StringVar(
-            value="/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music"
+        self.folder = self.pvar("folder", "")
+        self.duration = self.pvar("duration", "15")
+        self.cover = self.pvar("cover", "")
+        self.music = self.pvar(
+            "music",
+            "/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music",
         )
-        self.output = tk.StringVar()
+        self.output = self.pvar("output", "")
 
         grid = ttk.Frame(self)
         grid.pack(fill="x")
@@ -497,15 +570,17 @@ class RotateVideoTab(RunnerTab):
 # ---------------------------------------------------------------------------
 
 class CarouselTab(RunnerTab):
+    persist_prefix = "carousel"
+
     def __init__(self, master):
         super().__init__(master, carousel_mod.run,
                          default_input_dir=os.path.join(PROJECT_ROOT, "imagesSwipeys2"))
 
     def _build_form(self):
-        self.folder = tk.StringVar()
-        self.num_slides = tk.StringVar(value="20")
-        self.aspect = tk.StringVar(value="9:16")
-        self.output_dir = tk.StringVar()
+        self.folder = self.pvar("folder", "")
+        self.num_slides = self.pvar("num_slides", "20")
+        self.aspect = self.pvar("aspect", "9:16")
+        self.output_dir = self.pvar("output_dir", "")
 
         grid = ttk.Frame(self)
         grid.pack(fill="x")
@@ -563,21 +638,24 @@ class CarouselTab(RunnerTab):
 # ---------------------------------------------------------------------------
 
 class ScrollVideoTab(RunnerTab):
+    persist_prefix = "scroll_video"
+
     def __init__(self, master):
         super().__init__(master, scroll_video_mod.run,
                          default_input_dir=os.path.join(PROJECT_ROOT, "imagesSwipeys2"))
 
     def _build_form(self):
-        self.folder = tk.StringVar()
-        self.aspect = tk.StringVar(value="9:16")
-        self.output = tk.StringVar()
-        self.scroll_mode = tk.StringVar(value="Continuous pan")
-        self.stepped_hold_s = tk.StringVar(value="2.0")
-        self.scroll_speed_pct = tk.StringVar(value="200")
-        self.music = tk.StringVar(
-            value="/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music"
+        self.folder = self.pvar("folder", "")
+        self.aspect = self.pvar("aspect", "9:16")
+        self.output = self.pvar("output", "")
+        self.scroll_mode = self.pvar("scroll_mode", "Continuous pan")
+        self.stepped_hold_s = self.pvar("stepped_hold_s", "2.0")
+        self.scroll_speed_pct = self.pvar("scroll_speed_pct", "200")
+        self.music = self.pvar(
+            "music",
+            "/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music",
         )
-        self.end_screen = tk.StringVar(value=DEFAULT_WATERMARK)
+        self.end_screen = self.pvar("end_screen", DEFAULT_WATERMARK)
 
         grid = ttk.Frame(self)
         grid.pack(fill="x")
@@ -722,20 +800,23 @@ class ScrollVideoTab(RunnerTab):
 # ---------------------------------------------------------------------------
 
 class ReelTab(RunnerTab):
+    persist_prefix = "reel"
+
     def __init__(self, master):
         super().__init__(master, reel_mod.run,
                          default_input_dir=os.path.join(PROJECT_ROOT, "vertHorizVideo"))
 
     def _build_form(self):
-        self.folder = tk.StringVar()
-        self.interval = tk.StringVar(value="2.0")
-        self.music_folder = tk.StringVar(
-            value="/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music"
+        self.folder = self.pvar("folder", "")
+        self.interval = self.pvar("interval", "2.0")
+        self.music_folder = self.pvar(
+            "music_folder",
+            "/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music",
         )
-        self.beats_per_transition = tk.StringVar(value="4")
-        self.end_screen = tk.StringVar(value=DEFAULT_WATERMARK)
-        self.output = tk.StringVar()
-        self.bg = tk.StringVar()
+        self.beats_per_transition = self.pvar("beats_per_transition", "4")
+        self.end_screen = self.pvar("end_screen", DEFAULT_WATERMARK)
+        self.output = self.pvar("output", "")
+        self.bg = self.pvar("bg", "")
 
         grid = ttk.Frame(self)
         grid.pack(fill="x")
@@ -864,13 +945,15 @@ class ReelTab(RunnerTab):
 # ---------------------------------------------------------------------------
 
 class CroppingTab(RunnerTab):
+    persist_prefix = "cropping"
+
     def __init__(self, master):
         super().__init__(master, cropping_mod.run,
                          default_input_dir=PROJECT_ROOT)
 
     def _build_form(self):
-        self.folder = tk.StringVar()
-        self.watermark = tk.StringVar(value=DEFAULT_WATERMARK)
+        self.folder = self.pvar("folder", "")
+        self.watermark = self.pvar("watermark", DEFAULT_WATERMARK)
 
         grid = ttk.Frame(self)
         grid.pack(fill="x")
@@ -920,15 +1003,17 @@ class CroppingTab(RunnerTab):
 # ---------------------------------------------------------------------------
 
 class WallsTab(RunnerTab):
+    persist_prefix = "walls"
+
     def __init__(self, master):
         super().__init__(master, walls_mod.run,
                          default_input_dir=PROJECT_ROOT)
 
     def _build_form(self):
-        self.wall_folder = tk.StringVar(value=WALLS_DIR)
-        self.image_folder = tk.StringVar()
-        self.num_outputs = tk.StringVar(value="10")
-        self.output_dir = tk.StringVar()
+        self.wall_folder = self.pvar("wall_folder", WALLS_DIR)
+        self.image_folder = self.pvar("image_folder", "")
+        self.num_outputs = self.pvar("num_outputs", "10")
+        self.output_dir = self.pvar("output_dir", "")
 
         grid = ttk.Frame(self)
         grid.pack(fill="x")
@@ -992,15 +1077,17 @@ class WallsTab(RunnerTab):
 # ---------------------------------------------------------------------------
 
 class SplitTab(RunnerTab):
+    persist_prefix = "split"
+
     def __init__(self, master):
         super().__init__(master, split_mod.run,
                          default_input_dir=PROJECT_ROOT)
 
     def _build_form(self):
-        self.image = tk.StringVar()
-        self.aspect_ratio = tk.StringVar(value="9:16")
-        self.output_dir = tk.StringVar()
-        self.bg = tk.StringVar()
+        self.image = self.pvar("image", "")
+        self.aspect_ratio = self.pvar("aspect_ratio", "9:16")
+        self.output_dir = self.pvar("output_dir", "")
+        self.bg = self.pvar("bg", "")
 
         grid = ttk.Frame(self)
         grid.pack(fill="x")
@@ -1069,20 +1156,23 @@ class SplitTab(RunnerTab):
 # ---------------------------------------------------------------------------
 
 class KenBurnsTab(RunnerTab):
+    persist_prefix = "ken_burns"
+
     def __init__(self, master):
         super().__init__(master, ken_burns_mod.run,
                          default_input_dir=PROJECT_ROOT)
 
     def _build_form(self):
-        self.folder = tk.StringVar()
-        self.num_images = tk.StringVar(value="20")
-        self.aspect = tk.StringVar(value="16:9")
-        self.duration = tk.StringVar(value="4.0")
-        self.kb_strength_pct = tk.StringVar(value="50")
-        self.music = tk.StringVar(
-            value="/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music"
+        self.folder = self.pvar("folder", "")
+        self.num_images = self.pvar("num_images", "20")
+        self.aspect = self.pvar("aspect", "16:9")
+        self.duration = self.pvar("duration", "4.0")
+        self.kb_strength_pct = self.pvar("kb_strength_pct", "50")
+        self.music = self.pvar(
+            "music",
+            "/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music",
         )
-        self.output = tk.StringVar()
+        self.output = self.pvar("output", "")
 
         grid = ttk.Frame(self)
         grid.pack(fill="x")
