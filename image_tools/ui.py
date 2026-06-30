@@ -23,7 +23,6 @@ from . import (
 )
 from . import carousel as carousel_mod
 from . import collage as collage_mod
-from . import cropping as cropping_mod
 from . import ken_burns as ken_burns_mod
 from . import reel as reel_mod
 from . import rotate_video as rotate_video_mod
@@ -941,64 +940,6 @@ class ReelTab(RunnerTab):
 
 
 # ---------------------------------------------------------------------------
-# Cropping (Ruby)
-# ---------------------------------------------------------------------------
-
-class CroppingTab(RunnerTab):
-    persist_prefix = "cropping"
-
-    def __init__(self, master):
-        super().__init__(master, cropping_mod.run,
-                         default_input_dir=PROJECT_ROOT)
-
-    def _build_form(self):
-        self.folder = self.pvar("folder", "")
-        self.watermark = self.pvar("watermark", DEFAULT_WATERMARK)
-
-        grid = ttk.Frame(self)
-        grid.pack(fill="x")
-        grid.columnconfigure(1, weight=1)
-
-        r = 0
-        ttk.Label(grid, text="Image folder").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.folder).grid(row=r, column=1, sticky="ew", padx=4)
-        ttk.Button(grid, text="Browse...",
-                   command=lambda: pick_dir(self.folder, self.default_input_dir)
-                   ).grid(row=r, column=2)
-        r += 1
-
-        ttk.Label(grid, text="Watermark file").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.watermark).grid(row=r, column=1, sticky="ew", padx=4)
-        ttk.Button(grid, text="Browse...", command=self._pick_watermark
-                   ).grid(row=r, column=2)
-        r += 1
-
-        ttk.Label(grid,
-                  text="(crops are written to _cropped_<ratio>/ subfolders inside the input folder)",
-                  foreground="gray").grid(row=r, column=0, columnspan=3, sticky="w")
-
-    def _pick_watermark(self):
-        initial = self.watermark.get() or DEFAULT_WATERMARK
-        path = filedialog.askopenfilename(
-            initialdir=os.path.dirname(initial) if initial else WATERMARKS_DIR,
-            initialfile=os.path.basename(initial) if initial else "",
-            filetypes=[("PNG", "*.png"), ("Image", "*.jpg *.jpeg *.png"),
-                       ("All files", "*.*")],
-            title="Pick a watermark image",
-        )
-        if path:
-            self.watermark.set(path)
-
-    def _gather_kwargs(self):
-        if not self.folder.get().strip():
-            raise ValueError("Pick an image folder.")
-        kw = {"folder": self.folder.get().strip()}
-        if self.watermark.get().strip():
-            kw["watermark"] = self.watermark.get().strip()
-        return kw
-
-
-# ---------------------------------------------------------------------------
 # Walls
 # ---------------------------------------------------------------------------
 
@@ -1172,6 +1113,10 @@ class KenBurnsTab(RunnerTab):
             "music",
             "/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music",
         )
+        self.gimmick = self.pvar("gimmick", False, tk.BooleanVar)
+        self.random_order = self.pvar("random_order", True, tk.BooleanVar)
+        self.end_screen = self.pvar("end_screen", DEFAULT_WATERMARK)
+        self.title = self.pvar("title", "")
         self.output = self.pvar("output", "")
 
         grid = ttk.Frame(self)
@@ -1220,6 +1165,29 @@ class KenBurnsTab(RunnerTab):
                    ).pack(side="left", padx=(4, 0))
         r += 1
 
+        ttk.Checkbutton(grid,
+                        text="Gimmick intro: flip-through of all selected images "
+                             "(0.05s each, music fades in)",
+                        variable=self.gimmick
+                        ).grid(row=r, column=0, columnspan=3, sticky="w", pady=2)
+        r += 1
+
+        ttk.Checkbutton(grid,
+                        text="Random order (off = alphabetical by filename)",
+                        variable=self.random_order
+                        ).grid(row=r, column=0, columnspan=3, sticky="w", pady=2)
+        r += 1
+
+        ttk.Label(grid, text="Title (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.title).grid(row=r, column=1, sticky="ew", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="End screen image (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.end_screen).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="File...", command=self._pick_end_screen
+                   ).grid(row=r, column=2)
+        r += 1
+
         ttk.Label(grid, text="Output file (optional)").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.output).grid(row=r, column=1, sticky="ew", padx=4)
         ttk.Button(grid, text="Save as...", command=self._pick_output
@@ -1258,6 +1226,20 @@ class KenBurnsTab(RunnerTab):
         if path:
             self.music.set(path)
 
+    def _pick_end_screen(self):
+        current = self.end_screen.get().strip()
+        if current and os.path.isfile(current):
+            initial_dir = os.path.dirname(current)
+        else:
+            initial_dir = WATERMARKS_DIR
+        path = filedialog.askopenfilename(
+            initialdir=initial_dir,
+            filetypes=[("Image", "*.png *.jpg *.jpeg"), ("All files", "*.*")],
+            title="Pick an end screen image",
+        )
+        if path:
+            self.end_screen.set(path)
+
     def _gather_kwargs(self):
         if not self.folder.get().strip():
             raise ValueError("Pick an image folder.")
@@ -1286,9 +1268,16 @@ class KenBurnsTab(RunnerTab):
             "aspect": self.aspect.get(),
             "duration_per_image": dur,
             "kb_strength": pct / 100.0,
+            "random_order": self.random_order.get(),
         }
         if self.music.get().strip():
             kw["music"] = self.music.get().strip()
+        if self.gimmick.get():
+            kw["gimmick"] = True
+        if self.end_screen.get().strip():
+            kw["end_screen"] = self.end_screen.get().strip()
+        if self.title.get().strip():
+            kw["title"] = self.title.get().strip()
         if self.output.get().strip():
             kw["output"] = self.output.get().strip()
         return kw
@@ -1312,7 +1301,6 @@ def main():
     nb.add(ScrollVideoTab(nb), text="Scroll Video")
     nb.add(ReelTab(nb),        text="Insta Reel")
     nb.add(KenBurnsTab(nb),    text="Ken Burns")
-    nb.add(CroppingTab(nb),    text="Cropping")
     nb.add(WallsTab(nb),       text="Walls")
     nb.add(SplitTab(nb),       text="Long Image Split")
 
