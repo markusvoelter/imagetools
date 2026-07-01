@@ -1117,6 +1117,10 @@ class KenBurnsTab(RunnerTab):
         self.random_order = self.pvar("random_order", True, tk.BooleanVar)
         self.end_screen = self.pvar("end_screen", DEFAULT_WATERMARK)
         self.title = self.pvar("title", "")
+        self.subtitle = self.pvar("subtitle", "")
+        self.title_font = self.pvar("title_font", "")
+        self.subtitle_font = self.pvar("subtitle_font", "")
+        self.text_slide_font = self.pvar("text_slide_font", "")
         self.output = self.pvar("output", "")
 
         grid = ttk.Frame(self)
@@ -1182,6 +1186,50 @@ class KenBurnsTab(RunnerTab):
         ttk.Entry(grid, textvariable=self.title).grid(row=r, column=1, sticky="ew", padx=4)
         r += 1
 
+        ttk.Label(grid, text="Title font (optional)"
+                  ).grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.title_font
+                  ).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="File...",
+                   command=lambda: self._pick_font(self.title_font)
+                   ).grid(row=r, column=2)
+        r += 1
+
+        ttk.Label(grid, text="Subtitle (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.subtitle).grid(row=r, column=1, sticky="ew", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="Subtitle font (optional)"
+                  ).grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.subtitle_font
+                  ).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="File...",
+                   command=lambda: self._pick_font(self.subtitle_font)
+                   ).grid(row=r, column=2)
+        r += 1
+
+        ttk.Label(grid, text="Text slides (one per line)"
+                  ).grid(row=r, column=0, sticky="nw", pady=2)
+        self.text_slides_widget = tk.Text(grid, height=4, wrap="word",
+                                          font=("Menlo", 11))
+        self.text_slides_widget.grid(row=r, column=1, columnspan=2,
+                                     sticky="ew", padx=4)
+        initial_text = _store.get(f"{self.persist_prefix}.text_slides", "")
+        if initial_text:
+            self.text_slides_widget.insert("1.0", initial_text)
+        self.text_slides_widget.bind("<KeyRelease>", self._save_text_slides)
+        self.text_slides_widget.bind("<FocusOut>", self._save_text_slides)
+        r += 1
+
+        ttk.Label(grid, text="Text-slide font (optional)"
+                  ).grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.text_slide_font
+                  ).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="File...",
+                   command=lambda: self._pick_font(self.text_slide_font)
+                   ).grid(row=r, column=2)
+        r += 1
+
         ttk.Label(grid, text="End screen image (optional)").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.end_screen).grid(row=r, column=1, sticky="ew", padx=4)
         ttk.Button(grid, text="File...", command=self._pick_end_screen
@@ -1240,6 +1288,27 @@ class KenBurnsTab(RunnerTab):
         if path:
             self.end_screen.set(path)
 
+    def _save_text_slides(self, _event=None):
+        value = self.text_slides_widget.get("1.0", "end-1c")
+        _store.set(f"{self.persist_prefix}.text_slides", value)
+
+    def _pick_font(self, var):
+        current = var.get().strip()
+        if current and os.path.isfile(current):
+            initial_dir = os.path.dirname(current)
+        elif sys.platform == "darwin":
+            initial_dir = "/System/Library/Fonts"
+        else:
+            initial_dir = os.path.expanduser("~")
+        path = filedialog.askopenfilename(
+            initialdir=initial_dir,
+            filetypes=[("Font files", "*.ttf *.ttc *.otf"),
+                       ("All files", "*.*")],
+            title="Pick a font file",
+        )
+        if path:
+            var.set(path)
+
     def _gather_kwargs(self):
         if not self.folder.get().strip():
             raise ValueError("Pick an image folder.")
@@ -1278,6 +1347,21 @@ class KenBurnsTab(RunnerTab):
             kw["end_screen"] = self.end_screen.get().strip()
         if self.title.get().strip():
             kw["title"] = self.title.get().strip()
+        if self.subtitle.get().strip():
+            kw["subtitle"] = self.subtitle.get().strip()
+        if self.title_font.get().strip():
+            kw["title_font"] = self.title_font.get().strip()
+        if self.subtitle_font.get().strip():
+            kw["subtitle_font"] = self.subtitle_font.get().strip()
+        if self.text_slide_font.get().strip():
+            kw["text_slide_font"] = self.text_slide_font.get().strip()
+        text_lines = [
+            line.strip()
+            for line in self.text_slides_widget.get("1.0", "end-1c").splitlines()
+            if line.strip()
+        ]
+        if text_lines:
+            kw["text_slides"] = text_lines
         if self.output.get().strip():
             kw["output"] = self.output.get().strip()
         return kw
