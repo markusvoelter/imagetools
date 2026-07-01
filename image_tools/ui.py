@@ -1104,6 +1104,7 @@ class KenBurnsTab(RunnerTab):
                          default_input_dir=PROJECT_ROOT)
 
     def _build_form(self):
+        self.project_name = self.pvar("project_name", "")
         self.folder = self.pvar("folder", "")
         self.num_images = self.pvar("num_images", "20")
         self.aspect = self.pvar("aspect", "16:9")
@@ -1121,13 +1122,19 @@ class KenBurnsTab(RunnerTab):
         self.title_font = self.pvar("title_font", "")
         self.subtitle_font = self.pvar("subtitle_font", "")
         self.text_slide_font = self.pvar("text_slide_font", "")
-        self.output = self.pvar("output", "")
+        self.title_screen = self.pvar("title_screen", "")
 
         grid = ttk.Frame(self)
         grid.pack(fill="x")
         grid.columnconfigure(1, weight=1)
 
         r = 0
+        ttk.Label(grid, text="Project name (optional)"
+                  ).grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.project_name
+                  ).grid(row=r, column=1, sticky="ew", padx=4)
+        r += 1
+
         ttk.Label(grid, text="Image folder").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.folder).grid(row=r, column=1, sticky="ew", padx=4)
         ttk.Button(grid, text="Browse...",
@@ -1186,6 +1193,14 @@ class KenBurnsTab(RunnerTab):
         ttk.Entry(grid, textvariable=self.title).grid(row=r, column=1, sticky="ew", padx=4)
         r += 1
 
+        ttk.Label(grid, text="Title screen image (optional)"
+                  ).grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.title_screen
+                  ).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="File...", command=self._pick_title_screen
+                   ).grid(row=r, column=2)
+        r += 1
+
         ttk.Label(grid, text="Title font (optional)"
                   ).grid(row=r, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.title_font
@@ -1236,26 +1251,11 @@ class KenBurnsTab(RunnerTab):
                    ).grid(row=r, column=2)
         r += 1
 
-        ttk.Label(grid, text="Output file (optional)").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.output).grid(row=r, column=1, sticky="ew", padx=4)
-        ttk.Button(grid, text="Save as...", command=self._pick_output
-                   ).grid(row=r, column=2)
-        r += 1
-
         ttk.Label(grid,
                   text="(16:9 picks landscape images, 9:16 picks portrait. "
-                       "Bars are filled with a heavy blur of the same image.)",
+                       "Video is written into the image folder — set Project name "
+                       "for a custom stem.)",
                   foreground="gray").grid(row=r, column=0, columnspan=3, sticky="w")
-
-    def _pick_output(self):
-        ensure_output_dir()
-        path = filedialog.asksaveasfilename(
-            defaultextension=".mp4",
-            filetypes=[("MP4", "*.mp4"), ("All files", "*.*")],
-            initialdir=OUTPUT_DIR,
-        )
-        if path:
-            self.output.set(path)
 
     def _pick_music_file(self):
         current = self.music.get().strip()
@@ -1291,6 +1291,20 @@ class KenBurnsTab(RunnerTab):
     def _save_text_slides(self, _event=None):
         value = self.text_slides_widget.get("1.0", "end-1c")
         _store.set(f"{self.persist_prefix}.text_slides", value)
+
+    def _pick_title_screen(self):
+        current = self.title_screen.get().strip()
+        if current and os.path.isfile(current):
+            initial_dir = os.path.dirname(current)
+        else:
+            initial_dir = WATERMARKS_DIR
+        path = filedialog.askopenfilename(
+            initialdir=initial_dir,
+            filetypes=[("Image", "*.png *.jpg *.jpeg"), ("All files", "*.*")],
+            title="Pick a title screen image",
+        )
+        if path:
+            self.title_screen.set(path)
 
     def _pick_font(self, var):
         current = var.get().strip()
@@ -1355,6 +1369,8 @@ class KenBurnsTab(RunnerTab):
             kw["subtitle_font"] = self.subtitle_font.get().strip()
         if self.text_slide_font.get().strip():
             kw["text_slide_font"] = self.text_slide_font.get().strip()
+        if self.title_screen.get().strip():
+            kw["title_screen"] = self.title_screen.get().strip()
         text_lines = [
             line.strip()
             for line in self.text_slides_widget.get("1.0", "end-1c").splitlines()
@@ -1362,8 +1378,8 @@ class KenBurnsTab(RunnerTab):
         ]
         if text_lines:
             kw["text_slides"] = text_lines
-        if self.output.get().strip():
-            kw["output"] = self.output.get().strip()
+        if self.project_name.get().strip():
+            kw["project_name"] = self.project_name.get().strip()
         return kw
 
 

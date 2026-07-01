@@ -16,9 +16,9 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
-from . import OUTPUT_DIR, RunContext, ensure_output_dir
+from . import RunContext
 
 
 FPS = 30
@@ -66,17 +66,18 @@ KB_TEXT_SLIDE_LINE_SPACING = 1.5    # multiline line-height multiplier (1.0 = de
 KB_TEXT_SLIDE_LINE_MAX_CHARS = 30   # landscape text slide: soft wrap a sentence past this many chars
 KB_TEXT_SLIDE_LINE_MAX_CHARS_PORTRAIT = 30  # portrait: wider lines → ~50% smaller font, more words per line
 KB_TEXT_SLIDE_MAX_LINES = 3         # landscape text slide: hard cap on total lines (widens chars/line to fit)
-KB_TEXT_SLIDE_BG_TOP = (0, 0, 0)    # gradient top: 100% black
-KB_TEXT_SLIDE_BG_BOTTOM = (38, 38, 38)  # gradient bottom: 85% black tint
-GIMMICK_FRAME_SECONDS = 0.05  # each gimmick image is shown for this many seconds
+KB_TEXT_SLIDE_BG_TOP = (0, 0, 0)    # gradient fallback: 100% black
+KB_TEXT_SLIDE_BG_BOTTOM = (38, 38, 38)  # gradient fallback: 85% black tint
+KB_TEXT_SLIDE_BACKDROP_DARKEN = 0.80       # text slide bg: darken previous photo by this (1 = pure black)
+KB_TEXT_SLIDE_BACKDROP_DESATURATE = 0.5    # text slide bg: desaturate previous photo by this (1 = fully grey)
+GIMMICK_START_FRAMES_PER_PIC = 1  # fastest gimmick pace (1 frame = 30 pics/sec at FPS=30)
+GIMMICK_END_FRAMES_PER_PIC = 3    # slowest gimmick pace (3 frames = 10 pics/sec at FPS=30)
 GIMMICK_CLICK_FREQ_HZ = 700   # carrier (tonal) frequency of the per-image "click"
 GIMMICK_CLICK_DECAY_S = 0.003 # exponential decay time constant of the click
 GIMMICK_CLICK_AMP = 0.6       # peak amplitude of the first click
 GIMMICK_CLICK_NOISE_WEIGHT = 0.75  # noise fraction of the click waveform
 GIMMICK_CLICK_TONE_WEIGHT = 0.25   # low-freq tonal fraction of the click
-GIMMICK_CLICK_FINAL_AMP_FRAC = 0.0  # last click is this fraction of the first
 GIMMICK_CLICK_MIX_WEIGHT = 0.7  # click track weight when mixing with music
-GIMMICK_MUSIC_FADE_IN_START = 0.5  # fraction of gimmick before music fade-in begins
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'}
 AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.wav', '.flac', '.aac', '.ogg', '.opus'}
 LANDSCAPE_MIN_AR = 1.05
@@ -473,15 +474,21 @@ def _wrap_title_text(text, out_w, out_h):
 
 
 def _build_title_slide_frame(title_text, subtitle_text, out_w, out_h,
-                              title_font_path=None, subtitle_font_path=None):
+                              title_font_path=None, subtitle_font_path=None,
+                              background_image_path=None):
     """Render a static RGB frame for the opening title slide.
 
-    Background: same vertical gradient as text slides.
+    Background: `background_image_path` (fitted like the end screen —
+    100% width landscape / 100% height + center-crop portrait) if supplied,
+    otherwise the same vertical gradient as text slides.
     Foreground: `title_text` (Arial Bold default, white) with optional
     `subtitle_text` (regular Arial, light grey) below, both with the soft
     grey drop shadow."""
-    bg = _vertical_gradient(out_w, out_h,
-                            KB_TEXT_SLIDE_BG_TOP, KB_TEXT_SLIDE_BG_BOTTOM)
+    if background_image_path is not None:
+        bg = _build_end_screen_frame(background_image_path, out_w, out_h)
+    else:
+        bg = _vertical_gradient(out_w, out_h,
+                                KB_TEXT_SLIDE_BG_TOP, KB_TEXT_SLIDE_BG_BOTTOM)
     overlay = _build_title_overlay(
         title_text, subtitle_text, out_w, out_h,
         title_font_path=title_font_path,
@@ -504,6 +511,36 @@ def _text_slide_factor(text):
     return TEXT_SLIDE_MIN_FACTOR + t * (TEXT_SLIDE_MAX_FACTOR - TEXT_SLIDE_MIN_FACTOR)
 
 
+def _prepare_photo_backdrop(image_path, out_w, out_h,
+                            darken=KB_TEXT_SLIDE_BACKDROP_DARKEN,
+                            desaturate=KB_TEXT_SLIDE_BACKDROP_DESATURATE):
+    """Return an RGB image at (out_w, out_h) filled with `image_path`
+    center-cropped scale-to-fill, then desaturated by `desaturate` (0..1)
+    and darkened by `darken` (0..1). Used as a soft text-slide backdrop
+    derived from the preceding photo."""
+    src = Image.open(image_path).convert("RGB")
+    iw, ih = src.size
+    src_ar = iw / ih
+    target_ar = out_w / out_h
+    if src_ar > target_ar:
+        scale = out_h / ih
+        new_w = max(1, int(round(iw * scale)))
+        scaled = src.resize((new_w, out_h), Image.LANCZOS)
+        left = (new_w - out_w) // 2
+        scaled = scaled.crop((left, 0, left + out_w, out_h))
+    else:
+        scale = out_w / iw
+        new_h = max(1, int(round(ih * scale)))
+        scaled = src.resize((out_w, new_h), Image.LANCZOS)
+        top = (new_h - out_h) // 2
+        scaled = scaled.crop((0, top, out_w, top + out_h))
+    saturation_factor = max(0.0, 1.0 - desaturate)
+    scaled = ImageEnhance.Color(scaled).enhance(saturation_factor)
+    brightness_factor = max(0.0, 1.0 - darken)
+    scaled = ImageEnhance.Brightness(scaled).enhance(brightness_factor)
+    return scaled
+
+
 def _vertical_gradient(out_w, out_h, top_rgb, bottom_rgb):
     """Return an RGB image with a vertical gradient from `top_rgb` (y=0) to
     `bottom_rgb` (y=out_h-1)."""
@@ -521,18 +558,24 @@ def _vertical_gradient(out_w, out_h, top_rgb, bottom_rgb):
     return strip.resize((out_w, out_h), Image.NEAREST)
 
 
-def _build_text_slide_frame(text, out_w, out_h, font_path=None):
+def _build_text_slide_frame(text, out_w, out_h, font_path=None,
+                            backdrop_path=None):
     """Render a static RGB frame for an interspersed text slide.
 
-    Background: vertical gradient from KB_TEXT_SLIDE_BG_TOP to BG_BOTTOM.
+    Background: darkened + desaturated version of `backdrop_path` if
+    supplied (typically the last image before this slide); otherwise the
+    vertical gradient KB_TEXT_SLIDE_BG_TOP → BG_BOTTOM.
     Text: centered, Arial Bold (or `font_path`), white with soft grey drop
     shadow, sized to fit KB_TEXT_SLIDE_WIDTH_FRAC of canvas width (more
     padding than the title), line height multiplied by
     KB_TEXT_SLIDE_LINE_SPACING. Sentences are placed on separate lines and
     long sentences wrap greedily at KB_TEXT_SLIDE_LINE_MAX_CHARS.
     """
-    bg = _vertical_gradient(out_w, out_h,
-                            KB_TEXT_SLIDE_BG_TOP, KB_TEXT_SLIDE_BG_BOTTOM)
+    if backdrop_path is not None:
+        bg = _prepare_photo_backdrop(backdrop_path, out_w, out_h)
+    else:
+        bg = _vertical_gradient(out_w, out_h,
+                                KB_TEXT_SLIDE_BG_TOP, KB_TEXT_SLIDE_BG_BOTTOM)
     if out_h > out_w:
         wrapped = _wrap_text_for_slide(
             text,
@@ -703,7 +746,8 @@ def run(*, folder, num_images=20, aspect="16:9",
         music=None, gimmick=False, end_screen=None,
         title=None, subtitle=None, text_slides=None,
         title_font=None, subtitle_font=None, text_slide_font=None,
-        output=None, random_order=True, ctx=None):
+        title_screen=None, project_name=None,
+        random_order=True, ctx=None):
     """Render the Ken Burns video.
 
     folder              folder of source images
@@ -742,7 +786,13 @@ def run(*, folder, num_images=20, aspect="16:9",
                         (overrides regular Arial default)
     text_slide_font     optional path to a font file for interspersed text
                         slides (overrides Arial Bold default)
-    output              .mp4 path; auto-named in OUTPUT_DIR if None
+    title_screen        optional path to an image used as the title slide's
+                        background (fitted like the end screen); the
+                        title/subtitle text is overlaid on top. Falls back
+                        to the vertical gradient when omitted.
+    project_name        optional stem for the output filename; the .mp4 is
+                        written into `folder`. If omitted, a timestamped
+                        `kenburns_{aspect}_{ts}.mp4` is used instead.
     random_order        if True (default), pick images randomly; otherwise
                         scan in alphabetical order and take the first
                         `num_images` matching ones
@@ -811,10 +861,16 @@ def run(*, folder, num_images=20, aspect="16:9",
         title_text_wrapped = _wrap_title_text(title.strip(), out_w, out_h)
         subtitle_text_wrapped = (_wrap_title_text(subtitle.strip(), out_w, out_h)
                                  if subtitle and subtitle.strip() else "")
+        title_screen_path = None
+        if title_screen and title_screen.strip():
+            title_screen_path = os.path.abspath(title_screen.strip())
+            if not os.path.isfile(title_screen_path):
+                raise ValueError(f"Title screen image not found: {title_screen_path}")
         title_slide_frame = _build_title_slide_frame(
             title_text_wrapped, subtitle_text_wrapped, out_w, out_h,
             title_font_path=title_font,
-            subtitle_font_path=subtitle_font)
+            subtitle_font_path=subtitle_font,
+            background_image_path=title_screen_path)
         title_label = title_text_wrapped.replace("\n", " / ")
         slides_seq.insert(0, {
             "kind": "title",
@@ -824,14 +880,13 @@ def run(*, folder, num_images=20, aspect="16:9",
         })
     total_slides = len(slides_seq)
 
-    if output is None:
-        ensure_output_dir()
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output = os.path.join(OUTPUT_DIR,
-                              f"kenburns_{aspect.replace(':', 'x')}_{ts}.mp4")
+    if project_name and project_name.strip():
+        stem = project_name.strip()
     else:
-        output = os.path.abspath(output)
-        os.makedirs(os.path.dirname(output), exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        stem = f"kenburns_{aspect.replace(':', 'x')}_{ts}"
+    output = os.path.join(folder, f"{stem}.mp4")
+    os.makedirs(os.path.dirname(output), exist_ok=True)
 
     frames_per_image = max(2, int(round(duration_per_image * FPS)))
     crossfade_frames = min(int(round(CROSSFADE_S * FPS)),
@@ -850,15 +905,56 @@ def run(*, folder, num_images=20, aspect="16:9",
     main_seconds = total_main_frames / FPS
 
     if gimmick:
-        gimmick_frames_per_image = max(1, int(round(GIMMICK_FRAME_SECONDS * FPS)))
-        gimmick_total_frames = n * gimmick_frames_per_image
+        # Image ramp: integer frames per image, one-frame steps from
+        # GIMMICK_START_FRAMES_PER_PIC (fastest) to GIMMICK_END_FRAMES_PER_PIC
+        # (slowest). Split n images across those K = (end - start + 1)
+        # buckets as evenly as possible; earlier (faster) buckets get any
+        # remainder so the ramp starts fast and slows down.
+        n_buckets = (GIMMICK_END_FRAMES_PER_PIC
+                     - GIMMICK_START_FRAMES_PER_PIC + 1)
+        base = n // n_buckets
+        remainder = n % n_buckets
+        gimmick_frames_list = []
+        for k in range(n_buckets):
+            size = base + (1 if k < remainder else 0)
+            frames_per_pic = GIMMICK_START_FRAMES_PER_PIC + k
+            gimmick_frames_list.extend([frames_per_pic] * size)
+        gimmick_total_frames = sum(gimmick_frames_list)
         gimmick_duration = gimmick_total_frames / FPS
-        gimmick_period = gimmick_frames_per_image / FPS
+        # Cumulative start times (seconds) of each gimmick image
+        gimmick_image_starts = []
+        _cum = 0
+        for gfpi in gimmick_frames_list:
+            gimmick_image_starts.append(_cum / FPS)
+            _cum += gfpi
+        # Audio ramp: continuous linear interpolation of click intervals so
+        # the click track sounds like a smooth deceleration, decoupled from
+        # the frame-quantized visuals. Intervals scale so their sum equals
+        # gimmick_duration — audio and video still end together, just
+        # slightly out of sync in the middle (imperceptible at this pace).
+        ratio = (GIMMICK_END_FRAMES_PER_PIC
+                 / GIMMICK_START_FRAMES_PER_PIC)  # slowest/fastest
+        if n == 1:
+            click_intervals = [gimmick_duration]
+        else:
+            # sum = n * a * (1 + ratio) / 2 = gimmick_duration
+            a = 2 * gimmick_duration / (n * (1 + ratio))
+            click_intervals = [
+                a * (1 + (ratio - 1) * i / (n - 1)) for i in range(n)
+            ]
+        click_starts = []
+        _c = 0.0
+        for iv in click_intervals:
+            click_starts.append(_c)
+            _c += iv
+        click_end_boundary = _c
     else:
-        gimmick_frames_per_image = 0
+        gimmick_frames_list = []
         gimmick_total_frames = 0
         gimmick_duration = 0.0
-        gimmick_period = 0.0
+        gimmick_image_starts = []
+        click_starts = []
+        click_end_boundary = 0.0
 
     end_screen_frame = None
     end_screen_fade_frames = 0
@@ -876,8 +972,9 @@ def run(*, folder, num_images=20, aspect="16:9",
     total_seconds = gimmick_duration + main_seconds + end_screen_seconds
 
     if title_label:
+        bg_desc = f"image bg ({title_screen_path})" if title_screen_path else "gradient bg"
         ctx.log(f"Title slide: \"{title_label}\" "
-                f"({KB_TITLE_DURATION_S:.1f}s, gradient bg)")
+                f"({KB_TITLE_DURATION_S:.1f}s, {bg_desc})")
         sub_text = slides_seq[0].get("subtitle", "")
         if sub_text:
             ctx.log(f"Subtitle: \"{sub_text.replace(chr(10), ' / ')}\"")
@@ -892,9 +989,14 @@ def run(*, folder, num_images=20, aspect="16:9",
                 f"words up to {TEXT_SLIDE_MAX_FACTOR:g}x at "
                 f"≥{TEXT_SLIDE_MAX_WORDS} words")
     if gimmick:
-        ctx.log(f"Gimmick intro: {gimmick_frames_per_image} frame(s) per image "
-                f"× {n} = {gimmick_duration:.2f}s "
-                f"(music fades in, spoke-click on each flip)")
+        speed_start = FPS / gimmick_frames_list[0]
+        speed_end = FPS / gimmick_frames_list[-1]
+        ctx.log(f"Gimmick intro: {n} image(s), {gimmick_duration:.2f}s total "
+                f"({gimmick_frames_list[0]}→{gimmick_frames_list[-1]} "
+                f"frame(s) per image = {speed_start:.0f}→{speed_end:.0f} pics/sec); "
+                f"constant-volume click on each flip; "
+                f"music starts after gimmick"
+                + (" + half of title" if title_label else ""))
     s_clamped = max(0.0, min(1.0, kb_strength))
     ctx.log(f"Ken Burns strength: {kb_strength:.2f} "
             f"(max zoom {1.0 + s_clamped * MAX_ZOOM_AT_FULL_STRENGTH:.2f}x, "
@@ -925,14 +1027,18 @@ def run(*, folder, num_images=20, aspect="16:9",
     if audio_track:
         extra_inputs.extend(['-i', audio_track])
         music_chain = ['aresample=44100']
+        # Music starts after any gimmick intro, then half-way through the
+        # opening title slide (if one is set), so it swells under the title.
+        music_start_s = 0.0
         if gimmick and gimmick_duration > 0:
-            # Music stays silent for the first half of the gimmick, then fades
-            # in over the second half so it reaches full volume right at the
-            # end of the intro.
-            fade_in_start = gimmick_duration * GIMMICK_MUSIC_FADE_IN_START
-            fade_in_dur = gimmick_duration - fade_in_start
+            music_start_s += gimmick_duration
+        if title_label:
+            music_start_s += KB_TITLE_DURATION_S / 2
+        if music_start_s > 0:
+            delay_ms = int(round(music_start_s * 1000))
+            music_chain.append(f"adelay={delay_ms}|{delay_ms}")
             music_chain.append(
-                f"afade=t=in:st={fade_in_start:.3f}:d={fade_in_dur:.3f}"
+                f"afade=t=in:st={music_start_s:.3f}:d=0.5"
             )
         audio_fade_start = max(0.0, total_seconds - KB_AUDIO_FADE_OUT_S)
         music_chain.append(
@@ -940,37 +1046,38 @@ def run(*, folder, num_images=20, aspect="16:9",
         )
         filter_complex_parts.append(f"[1:a]{','.join(music_chain)}[music]")
 
-    if gimmick and gimmick_duration > 0 and gimmick_period > 0:
+    if gimmick and gimmick_duration > 0 and gimmick_frames_list:
         # Damped impulse at the start of every gimmick interval — a low-freq
         # tonal "thump" mixed with white noise gives a darker, spoke-like
-        # click rather than a sine beep. Subsequent clicks ramp down linearly
-        # so the last one is GIMMICK_CLICK_FINAL_AMP_FRAC of the first.
-        # Silent after the gimmick window ends.
-        tau = f"mod(t,{gimmick_period:.4f})"
-        envelope = f"{GIMMICK_CLICK_AMP}*exp(-{tau}/{GIMMICK_CLICK_DECAY_S})"
-        waveform = (
-            f"((2*random(0)-1)*{GIMMICK_CLICK_NOISE_WEIGHT}"
-            f"+cos(2*PI*{GIMMICK_CLICK_FREQ_HZ}*{tau})*{GIMMICK_CLICK_TONE_WEIGHT})"
-        )
-        final_frac = GIMMICK_CLICK_FINAL_AMP_FRAC
-        delta = 1.0 - final_frac
-        if n > 1:
-            ramp_span = (n - 1) * gimmick_period
-            ramp_expr = (f"max({final_frac:.4f},"
-                         f"1-{delta:.4f}*t/{ramp_span:.4f})")
-        else:
-            ramp_expr = "1"
-        click_expr = (
-            f"if(lt(t,{gimmick_duration:.3f}),"
-            f"{envelope}*{waveform}*{ramp_expr},0)"
-        )
+        # click rather than a sine beep. Because per-image durations vary
+        # (2× → 1× speed ramp), tau can't be a fixed mod(); instead we
+        # build a nested-if chain that resets tau = t - image_start at each
+        # image boundary. Abruptly cut to silence when the gimmick ends.
+        def _click_wave(tau_expr):
+            envelope = (f"{GIMMICK_CLICK_AMP}"
+                        f"*exp(-({tau_expr})/{GIMMICK_CLICK_DECAY_S})")
+            waveform = (
+                f"((2*random(0)-1)*{GIMMICK_CLICK_NOISE_WEIGHT}"
+                f"+cos(2*PI*{GIMMICK_CLICK_FREQ_HZ}*({tau_expr}))"
+                f"*{GIMMICK_CLICK_TONE_WEIGHT})"
+            )
+            return f"{envelope}*{waveform}"
+
+        # Boundaries come from the continuous audio schedule, not the
+        # frame-quantized image list, so the clicks slow down smoothly.
+        boundaries = list(click_starts) + [click_end_boundary]
+        click_expr = "0"
+        for i in reversed(range(n)):
+            end = boundaries[i + 1]
+            click = _click_wave(f"(t-{boundaries[i]:.4f})")
+            click_expr = f"if(lt(t,{end:.4f}),{click},{click_expr})"
         filter_complex_parts.append(
             f"aevalsrc=exprs='{click_expr}|{click_expr}':"
             f"d={total_seconds:.3f}:s=44100[clicks]"
         )
 
     has_music = audio_track is not None
-    has_clicks = gimmick and gimmick_duration > 0 and gimmick_period > 0
+    has_clicks = gimmick and gimmick_duration > 0 and bool(gimmick_frames_list)
 
     if has_music and has_clicks:
         filter_complex_parts.append(
@@ -1030,7 +1137,7 @@ def run(*, folder, num_images=20, aspect="16:9",
                     break
                 frame = _gimmick_frame(path, out_w, out_h)
                 fb = frame.tobytes()
-                for _ in range(gimmick_frames_per_image):
+                for _ in range(gimmick_frames_list[i]):
                     proc.stdin.write(fb)
 
         for i, slide in enumerate(slides_seq):
@@ -1055,12 +1162,19 @@ def run(*, folder, num_images=20, aspect="16:9",
                     return _f
             else:
                 wc = len(slide["text"].split())
+                # Backdrop = last image before this slide, darkened + desaturated.
+                backdrop_path = None
+                for prev in reversed(slides_seq[:i]):
+                    if prev["kind"] == "image":
+                        backdrop_path = prev["path"]
+                        break
                 ctx.log(f"  [{i + 1}/{total_slides}] [text] {slide['text']} "
                         f"({wc} word{'s' if wc != 1 else ''}, "
                         f"{fpi_local/FPS:.1f}s)")
                 static_text_frame = _build_text_slide_frame(
                     slide["text"], out_w, out_h,
-                    font_path=text_slide_font)
+                    font_path=text_slide_font,
+                    backdrop_path=backdrop_path)
 
                 def frame_at(k, _f=static_text_frame):
                     return _f
