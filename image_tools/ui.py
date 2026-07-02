@@ -1025,7 +1025,7 @@ class SplitTab(RunnerTab):
                          default_input_dir=PROJECT_ROOT)
 
     def _build_form(self):
-        self.image = self.pvar("image", "")
+        self.folder = self.pvar("folder", "")
         self.aspect_ratio = self.pvar("aspect_ratio", "9:16")
         self.output_dir = self.pvar("output_dir", "")
         self.bg = self.pvar("bg", "")
@@ -1035,9 +1035,11 @@ class SplitTab(RunnerTab):
         grid.columnconfigure(1, weight=1)
 
         r = 0
-        ttk.Label(grid, text="Input image").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.image).grid(row=r, column=1, sticky="ew", padx=4)
-        ttk.Button(grid, text="Browse...", command=self._pick_input).grid(row=r, column=2)
+        ttk.Label(grid, text="Input folder").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.folder).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="Browse...",
+                   command=lambda: pick_dir(self.folder, self.default_input_dir)
+                   ).grid(row=r, column=2)
         r += 1
 
         ttk.Label(grid, text="Aspect ratio").grid(row=r, column=0, sticky="w", pady=2)
@@ -1060,29 +1062,18 @@ class SplitTab(RunnerTab):
         r += 1
 
         ttk.Label(grid,
-                  text="(slides keep original height; width = height × aspect ratio. "
-                       "Padding is only used if input is narrower than one slide.)",
-                  foreground="gray").grid(row=r, column=0, columnspan=3, sticky="w")
-
-    def _pick_input(self):
-        current = self.image.get().strip()
-        if current and os.path.isfile(current):
-            initial_dir = os.path.dirname(current)
-        else:
-            initial_dir = current if current else self.default_input_dir
-        path = filedialog.askopenfilename(
-            initialdir=initial_dir,
-            filetypes=[("Image", "*.jpg *.jpeg *.png"), ("All files", "*.*")],
-            title="Pick a landscape photo",
-        )
-        if path:
-            self.image.set(path)
+                  text="(every image in the folder is split; slides keep original height, "
+                       "width = height × aspect ratio. Output subfolders sit next to each "
+                       "source image unless an output folder is set. Padding color is only "
+                       "used if an input is narrower than one slide.)",
+                  foreground="gray", wraplength=560, justify="left"
+                  ).grid(row=r, column=0, columnspan=3, sticky="w")
 
     def _gather_kwargs(self):
-        if not self.image.get().strip():
-            raise ValueError("Pick an input image.")
+        if not self.folder.get().strip():
+            raise ValueError("Pick an input folder.")
         kw = {
-            "image": self.image.get().strip(),
+            "folder": self.folder.get().strip(),
             "aspect_ratio": self.aspect_ratio.get(),
         }
         if self.output_dir.get().strip():

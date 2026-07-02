@@ -929,25 +929,32 @@ def run(*, folder, num_images=20, aspect="16:9",
             _cum += gfpi
         # Audio ramp: continuous linear interpolation of click intervals so
         # the click track sounds like a smooth deceleration, decoupled from
-        # the frame-quantized visuals. Intervals scale so their sum equals
-        # gimmick_duration — audio and video still end together, just
-        # slightly out of sync in the middle (imperceptible at this pace).
+        # the frame-quantized visuals. The n clicks are placed so the LAST
+        # one lands exactly at gimmick_duration — i.e., on the title-slide
+        # reveal (or the first main slide if no title). (n-1) intervals
+        # ramp fastest → slowest and fill [0, gimmick_duration], leaving
+        # the last flip-through image silent after the (n-1)-th click.
         ratio = (GIMMICK_END_FRAMES_PER_PIC
                  / GIMMICK_START_FRAMES_PER_PIC)  # slowest/fastest
         if n == 1:
-            click_intervals = [gimmick_duration]
+            click_starts = [gimmick_duration]
+        elif n == 2:
+            click_starts = [0.0, gimmick_duration]
         else:
-            # sum = n * a * (1 + ratio) / 2 = gimmick_duration
-            a = 2 * gimmick_duration / (n * (1 + ratio))
+            # sum = (n-1) * a * (1 + ratio) / 2 = gimmick_duration
+            a = 2 * gimmick_duration / ((n - 1) * (1 + ratio))
             click_intervals = [
-                a * (1 + (ratio - 1) * i / (n - 1)) for i in range(n)
+                a * (1 + (ratio - 1) * i / (n - 2)) for i in range(n - 1)
             ]
-        click_starts = []
-        _c = 0.0
-        for iv in click_intervals:
-            click_starts.append(_c)
-            _c += iv
-        click_end_boundary = _c
+            click_starts = [0.0]
+            _c = 0.0
+            for iv in click_intervals:
+                _c += iv
+                click_starts.append(_c)
+        # The final click sits at gimmick_duration; give its ~3ms decay
+        # tail room to sound by extending the last region into the title
+        # slide (the extra frames are cheap and inaudibly short).
+        click_end_boundary = gimmick_duration + 0.1
     else:
         gimmick_frames_list = []
         gimmick_total_frames = 0
@@ -991,10 +998,11 @@ def run(*, folder, num_images=20, aspect="16:9",
     if gimmick:
         speed_start = FPS / gimmick_frames_list[0]
         speed_end = FPS / gimmick_frames_list[-1]
+        click_target = "title reveal" if title_label else "first slide"
         ctx.log(f"Gimmick intro: {n} image(s), {gimmick_duration:.2f}s total "
                 f"({gimmick_frames_list[0]}→{gimmick_frames_list[-1]} "
                 f"frame(s) per image = {speed_start:.0f}→{speed_end:.0f} pics/sec); "
-                f"constant-volume click on each flip; "
+                f"{n} decelerating clicks ending on {click_target}; "
                 f"music starts after gimmick"
                 + (" + half of title" if title_label else ""))
     s_clamped = max(0.0, min(1.0, kb_strength))
@@ -1071,6 +1079,11 @@ def run(*, folder, num_images=20, aspect="16:9",
             end = boundaries[i + 1]
             click = _click_wave(f"(t-{boundaries[i]:.4f})")
             click_expr = f"if(lt(t,{end:.4f}),{click},{click_expr})"
+        # Silence before the first click; guards the click envelope's
+        # exp(-tau/decay) from evaluating with negative tau (would spike)
+        # when the first click doesn't start at t=0 (e.g. n=1 case).
+        if boundaries[0] > 0:
+            click_expr = f"if(gte(t,{boundaries[0]:.4f}),{click_expr},0)"
         filter_complex_parts.append(
             f"aevalsrc=exprs='{click_expr}|{click_expr}':"
             f"d={total_seconds:.3f}:s=44100[clicks]"
