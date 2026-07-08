@@ -3,23 +3,23 @@
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
 import tkinter as tk
 import traceback
 from pathlib import Path
-from tkinter import colorchooser, filedialog, ttk
+from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 
 from . import (
-    DEFAULT_WATERMARK,
     OUTPUT_DIR,
     PROJECT_ROOT,
     RunCancelled,
     RunContext,
     WALLS_DIR,
-    WATERMARKS_DIR,
     ensure_output_dir,
+    template_for,
 )
 from . import carousel as carousel_mod
 from . import collage as collage_mod
@@ -83,37 +83,181 @@ def reveal_output(path):
 # ---------------------------------------------------------------------------
 
 _STATE_PATH = Path.cwd() / ".image_tools_ui_state.json"
+_DEFAULT_PROJECT = "Default"
 
 
 class _PersistentStore:
-    """JSON-backed key/value store. Persisted automatically on each set()."""
+    """JSON-backed store of per-project field values.
+
+    On-disk shape:
+        {
+          "current_project": "<name>",
+          "projects": { "<name>": {"<key>": <value>, ...}, ... }
+        }
+
+    A legacy flat `{"<key>": <value>}` file is migrated on load into a
+    single "Default" project.
+    """
 
     def __init__(self, path):
         self.path = path
-        self.data = {}
+        self.projects = {}
+        self.current_project = _DEFAULT_PROJECT
+        self._listeners = []  # called on switch/clone/delete after data change
+        self._load()
+
+    def _load(self):
+        loaded = None
         try:
             with open(self.path) as f:
                 loaded = json.load(f)
-            if isinstance(loaded, dict):
-                self.data = loaded
         except (FileNotFoundError, json.JSONDecodeError, OSError):
-            pass
+            loaded = None
+        if isinstance(loaded, dict) and isinstance(loaded.get("projects"), dict):
+            self.projects = {
+                str(k): dict(v) for k, v in loaded["projects"].items()
+                if isinstance(v, dict)
+            }
+            cur = loaded.get("current_project")
+            if isinstance(cur, str) and cur in self.projects:
+                self.current_project = cur
+            elif self.projects:
+                self.current_project = sorted(self.projects)[0]
+        elif isinstance(loaded, dict) and loaded:
+            # Legacy flat schema — migrate into a single Default project.
+            self.projects = {_DEFAULT_PROJECT: dict(loaded)}
+            self.current_project = _DEFAULT_PROJECT
+        if not self.projects:
+            self.projects = {_DEFAULT_PROJECT: {}}
+            self.current_project = _DEFAULT_PROJECT
 
-    def get(self, key, default):
-        return self.data.get(key, default)
-
-    def set(self, key, value):
-        if self.data.get(key) == value:
-            return
-        self.data[key] = value
+    def _persist(self):
         try:
             with open(self.path, "w") as f:
-                json.dump(self.data, f, indent=2, sort_keys=True)
+                json.dump(
+                    {"current_project": self.current_project,
+                     "projects": self.projects},
+                    f, indent=2, sort_keys=True,
+                )
         except OSError:
             pass
 
+    def _current(self):
+        return self.projects.setdefault(self.current_project, {})
+
+    # -- key/value scoped to current project --
+
+    def get(self, key, default):
+        return self._current().get(key, default)
+
+    def set(self, key, value):
+        bucket = self._current()
+        if bucket.get(key) == value:
+            return
+        bucket[key] = value
+        self._persist()
+
+    # -- project management --
+
+    def list_projects(self):
+        return sorted(self.projects.keys(), key=str.lower)
+
+    def add_listener(self, fn):
+        """`fn()` is called whenever the current project changes (switch/clone/
+        delete) and tabs should reload their variables from the new project."""
+        self._listeners.append(fn)
+
+    def _notify(self):
+        for fn in self._listeners:
+            try:
+                fn()
+            except Exception:  # noqa: BLE001 - listener isolation
+                traceback.print_exc()
+
+    def switch_project(self, name):
+        if name not in self.projects or name == self.current_project:
+            return
+        self.current_project = name
+        self._persist()
+        self._notify()
+
+    def clone_project(self, new_name):
+        """Duplicate the current project's data under `new_name` and switch."""
+        new_name = new_name.strip()
+        if not new_name:
+            raise ValueError("Project name cannot be empty.")
+        if new_name in self.projects:
+            raise ValueError(f"Project '{new_name}' already exists.")
+        self.projects[new_name] = dict(self._current())
+        self.current_project = new_name
+        self._persist()
+        self._notify()
+
+    def delete_project(self, name):
+        """Remove `name`. If it was current, switch to another (creating the
+        Default project again if it's the last one)."""
+        if name not in self.projects:
+            return
+        del self.projects[name]
+        if not self.projects:
+            self.projects[_DEFAULT_PROJECT] = {}
+            self.current_project = _DEFAULT_PROJECT
+        elif name == self.current_project:
+            self.current_project = self.list_projects()[0]
+        self._persist()
+        self._notify()
+
 
 _store = _PersistentStore(_STATE_PATH)
+
+
+# ---------------------------------------------------------------------------
+# Global (per-project) fields shared across all tabs
+# ---------------------------------------------------------------------------
+
+_GLOBAL_FOLDER_KEY = "_global.image_folder"
+_global_folder_var = None  # tk.StringVar, created by _build_project_bar
+
+
+def _coerce_stored(var_class, value, default):
+    if var_class is tk.StringVar:
+        if isinstance(value, str):
+            return value
+        return "" if value is None else str(value)
+    if var_class is tk.BooleanVar:
+        return bool(value) if not isinstance(value, bool) else value
+    return value if value is not None else default
+
+
+def _make_global_folder_var():
+    """Create the module-level global folder tk.StringVar (idempotent).
+
+    The variable is persisted under `_GLOBAL_FOLDER_KEY` in the current
+    project's bucket, and refreshed automatically when the current project
+    changes.
+    """
+    global _global_folder_var
+    if _global_folder_var is not None:
+        return _global_folder_var
+    stored = _coerce_stored(tk.StringVar, _store.get(_GLOBAL_FOLDER_KEY, ""), "")
+    var = tk.StringVar(value=stored)
+    var.trace_add(
+        "write", lambda *a: _store.set(_GLOBAL_FOLDER_KEY, var.get()))
+
+    def _reload():
+        val = _coerce_stored(tk.StringVar, _store.get(_GLOBAL_FOLDER_KEY, ""), "")
+        var.set(val)
+
+    _store.add_listener(_reload)
+    _global_folder_var = var
+    return var
+
+
+def _current_image_folder():
+    """Return the currently-selected image folder (stripped) or ''."""
+    if _global_folder_var is None:
+        return ""
+    return _global_folder_var.get().strip()
 
 
 # ---------------------------------------------------------------------------
@@ -138,12 +282,16 @@ class RunnerTab(ttk.Frame):
         self.worker = None
         self.log_queue = queue.Queue()
         self.last_output = None
+        # (store_key, tk_var, default_value) entries used to reload the tab's
+        # inputs when the globally selected project changes.
+        self._pvars = []
         self._build_form()
         self._build_log()
         self.after(80, self._drain_log)
+        _store.add_listener(self._reload_from_store)
 
     def pvar(self, name, default, var_class=tk.StringVar):
-        """Return a tk.Variable bound to the global JSON store.
+        """Return a tk.Variable bound to the current project's JSON store.
 
         The store key is f"{self.persist_prefix}.{name}". If `persist_prefix`
         is None (e.g. for a tab that opts out), the variable is created with
@@ -152,16 +300,25 @@ class RunnerTab(ttk.Frame):
         if self.persist_prefix is None:
             return var_class(value=default)
         key = f"{self.persist_prefix}.{name}"
-        stored = _store.get(key, default)
-        # Coerce JSON-decoded values back to the var class' expected type so
-        # tk doesn't choke on e.g. a stored int going into a StringVar.
-        if var_class is tk.StringVar and not isinstance(stored, str):
-            stored = "" if stored is None else str(stored)
-        elif var_class is tk.BooleanVar and not isinstance(stored, bool):
-            stored = bool(stored)
+        stored = _coerce_stored(var_class, _store.get(key, default), default)
         var = var_class(value=stored)
         var.trace_add("write", lambda *a: _store.set(key, var.get()))
+        self._pvars.append((key, var, default))
         return var
+
+    def _reload_from_store(self):
+        """Called when the current project changes; refresh every pvar from
+        the newly-selected project (falling back to its original default)."""
+        for key, var, default in self._pvars:
+            stored = _coerce_stored(
+                type(var), _store.get(key, default), default)
+            var.set(stored)
+        self._reload_extras()
+
+    def _reload_extras(self):
+        """Override to reload non-pvar persistent widgets (e.g. multiline
+        Text boxes) when the current project changes."""
+        pass
 
     # to be overridden
     def _build_form(self):
@@ -294,7 +451,6 @@ class CollageTab(RunnerTab):
                          default_input_dir=os.path.join(PROJECT_ROOT, "imageCollage"))
 
     def _build_form(self):
-        self.folder = self.pvar("folder", "")
         self.style = self.pvar("style", "mosaic")
         self.repetitions = self.pvar("repetitions", "5")
         self.output = self.pvar("output", "")
@@ -308,13 +464,6 @@ class CollageTab(RunnerTab):
         grid.columnconfigure(1, weight=1)
 
         r = 0
-        ttk.Label(grid, text="Image folder").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.folder).grid(row=r, column=1, sticky="ew", padx=4)
-        ttk.Button(grid, text="Browse...",
-                   command=lambda: pick_dir(self.folder, self.default_input_dir)
-                   ).grid(row=r, column=2)
-        r += 1
-
         ttk.Label(grid, text="Style").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Combobox(grid, textvariable=self.style,
                      values=list(collage_mod.STYLES),
@@ -362,8 +511,9 @@ class CollageTab(RunnerTab):
             self.output.set(path)
 
     def _gather_kwargs(self):
-        if not self.folder.get().strip():
-            raise ValueError("Pick an image folder.")
+        folder = _current_image_folder()
+        if not folder:
+            raise ValueError("Pick an images folder in the project bar.")
         if not self.repetitions.get().strip():
             raise ValueError("Enter repetitions.")
         try:
@@ -374,7 +524,7 @@ class CollageTab(RunnerTab):
             raise ValueError("Repetitions must be at least 1.")
         self._reps = reps
         kw = {
-            "folder": self.folder.get().strip(),
+            "folder": folder,
             "style": self.style.get(),
         }
         if self.output.get().strip():
@@ -441,7 +591,6 @@ class RotateVideoTab(RunnerTab):
                          default_input_dir=os.path.join(PROJECT_ROOT, "imageRotateVideo"))
 
     def _build_form(self):
-        self.folder = self.pvar("folder", "")
         self.duration = self.pvar("duration", "15")
         self.cover = self.pvar("cover", "")
         self.music = self.pvar(
@@ -455,13 +604,6 @@ class RotateVideoTab(RunnerTab):
         grid.columnconfigure(1, weight=1)
 
         r = 0
-        ttk.Label(grid, text="Image folder").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.folder).grid(row=r, column=1, sticky="ew", padx=4)
-        ttk.Button(grid, text="Browse...",
-                   command=lambda: pick_dir(self.folder, self.default_input_dir)
-                   ).grid(row=r, column=2)
-        r += 1
-
         ttk.Label(grid, text="Total duration (seconds)").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.duration, width=10).grid(row=r, column=1, sticky="w", padx=4)
         r += 1
@@ -512,23 +654,24 @@ class RotateVideoTab(RunnerTab):
             self.music.set(path)
 
     def _pick_cover(self):
-        initial = self.folder.get() or self.default_input_dir
+        folder = _current_image_folder()
+        initial = folder or self.default_input_dir
         path = filedialog.askopenfilename(
             initialdir=initial,
             filetypes=[("Image", "*.jpg *.jpeg *.png"), ("All files", "*.*")],
         )
         if not path:
             return
-        folder = self.folder.get()
         if folder and os.path.dirname(os.path.abspath(path)) == os.path.abspath(folder):
             self.cover.set(os.path.basename(path))
+        elif not folder:
+            # First-time: promote the picked file's directory into the
+            # project's global images folder.
+            if _global_folder_var is not None:
+                _global_folder_var.set(os.path.dirname(path))
+            self.cover.set(os.path.basename(path))
         else:
-            # If folder hasn't been set yet, set it from the picked file
-            if not folder:
-                self.folder.set(os.path.dirname(path))
-                self.cover.set(os.path.basename(path))
-            else:
-                self.cover.set(path)
+            self.cover.set(path)
 
     def _pick_output(self):
         ensure_output_dir()
@@ -541,8 +684,9 @@ class RotateVideoTab(RunnerTab):
             self.output.set(path)
 
     def _gather_kwargs(self):
-        if not self.folder.get().strip():
-            raise ValueError("Pick an image folder.")
+        folder = _current_image_folder()
+        if not folder:
+            raise ValueError("Pick an images folder in the project bar.")
         if not self.duration.get().strip():
             raise ValueError("Enter a duration.")
         try:
@@ -553,7 +697,7 @@ class RotateVideoTab(RunnerTab):
             raise ValueError("Pick the cover image.")
 
         kw = {
-            "folder": self.folder.get().strip(),
+            "folder": folder,
             "total_duration_seconds": duration,
             "cover_image": self.cover.get().strip(),
         }
@@ -576,7 +720,6 @@ class CarouselTab(RunnerTab):
                          default_input_dir=os.path.join(PROJECT_ROOT, "imagesSwipeys2"))
 
     def _build_form(self):
-        self.folder = self.pvar("folder", "")
         self.num_slides = self.pvar("num_slides", "20")
         self.aspect = self.pvar("aspect", "9:16")
         self.output_dir = self.pvar("output_dir", "")
@@ -586,13 +729,6 @@ class CarouselTab(RunnerTab):
         grid.columnconfigure(1, weight=1)
 
         r = 0
-        ttk.Label(grid, text="Image folder").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.folder).grid(row=r, column=1, sticky="ew", padx=4)
-        ttk.Button(grid, text="Browse...",
-                   command=lambda: pick_dir(self.folder, self.default_input_dir)
-                   ).grid(row=r, column=2)
-        r += 1
-
         ttk.Label(grid, text="Number of slides").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.num_slides, width=10).grid(row=r, column=1, sticky="w", padx=4)
         r += 1
@@ -614,8 +750,9 @@ class CarouselTab(RunnerTab):
                   foreground="gray").grid(row=r, column=0, columnspan=3, sticky="w")
 
     def _gather_kwargs(self):
-        if not self.folder.get().strip():
-            raise ValueError("Pick an image folder.")
+        folder = _current_image_folder()
+        if not folder:
+            raise ValueError("Pick an images folder in the project bar.")
         if not self.num_slides.get().strip():
             raise ValueError("Enter the number of slides.")
         try:
@@ -623,7 +760,7 @@ class CarouselTab(RunnerTab):
         except ValueError:
             raise ValueError("Number of slides must be an integer.")
         kw = {
-            "folder": self.folder.get().strip(),
+            "folder": folder,
             "num_slides": n,
             "aspect_ratio": self.aspect.get(),
         }
@@ -644,7 +781,6 @@ class ScrollVideoTab(RunnerTab):
                          default_input_dir=os.path.join(PROJECT_ROOT, "imagesSwipeys2"))
 
     def _build_form(self):
-        self.folder = self.pvar("folder", "")
         self.aspect = self.pvar("aspect", "9:16")
         self.output = self.pvar("output", "")
         self.scroll_mode = self.pvar("scroll_mode", "Continuous pan")
@@ -654,20 +790,12 @@ class ScrollVideoTab(RunnerTab):
             "music",
             "/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music",
         )
-        self.end_screen = self.pvar("end_screen", DEFAULT_WATERMARK)
 
         grid = ttk.Frame(self)
         grid.pack(fill="x")
         grid.columnconfigure(1, weight=1)
 
         r = 0
-        ttk.Label(grid, text="Image folder").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.folder).grid(row=r, column=1, sticky="ew", padx=4)
-        ttk.Button(grid, text="Browse...",
-                   command=lambda: pick_dir(self.folder, self.default_input_dir)
-                   ).grid(row=r, column=2)
-        r += 1
-
         ttk.Label(grid, text="Aspect ratio").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Combobox(grid, textvariable=self.aspect,
                      values=list(scroll_video_mod.ASPECT_RATIOS.keys()),
@@ -703,12 +831,6 @@ class ScrollVideoTab(RunnerTab):
                    ).pack(side="left", padx=(4, 0))
         r += 1
 
-        ttk.Label(grid, text="End screen image (optional)").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.end_screen).grid(row=r, column=1, sticky="ew", padx=4)
-        ttk.Button(grid, text="File...", command=self._pick_end_screen
-                   ).grid(row=r, column=2)
-        r += 1
-
         ttk.Label(grid, text="Output file (optional)").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.output).grid(row=r, column=1, sticky="ew", padx=4)
         ttk.Button(grid, text="Save as...", command=self._pick_output
@@ -724,20 +846,6 @@ class ScrollVideoTab(RunnerTab):
         )
         if path:
             self.output.set(path)
-
-    def _pick_end_screen(self):
-        current = self.end_screen.get().strip()
-        if current and os.path.isfile(current):
-            initial_dir = os.path.dirname(current)
-        else:
-            initial_dir = WATERMARKS_DIR
-        path = filedialog.askopenfilename(
-            initialdir=initial_dir,
-            filetypes=[("Image", "*.png *.jpg *.jpeg"), ("All files", "*.*")],
-            title="Pick an end screen image",
-        )
-        if path:
-            self.end_screen.set(path)
 
     def _pick_music_file(self):
         current = self.music.get().strip()
@@ -757,14 +865,15 @@ class ScrollVideoTab(RunnerTab):
             self.music.set(path)
 
     def _gather_kwargs(self):
-        if not self.folder.get().strip():
-            raise ValueError("Pick an image folder.")
+        folder = _current_image_folder()
+        if not folder:
+            raise ValueError("Pick an images folder in the project bar.")
         mode_map = {
             "Continuous pan": scroll_video_mod.MODE_CONTINUOUS,
             "Hold each slide": scroll_video_mod.MODE_STEPPED,
         }
         kw = {
-            "folder": self.folder.get().strip(),
+            "folder": folder,
             "aspect_ratio": self.aspect.get(),
             "scroll_mode": mode_map.get(self.scroll_mode.get(),
                                         scroll_video_mod.MODE_CONTINUOUS),
@@ -787,8 +896,9 @@ class ScrollVideoTab(RunnerTab):
             kw["scroll_speed_pct"] = pct
         if self.music.get().strip():
             kw["music"] = self.music.get().strip()
-        if self.end_screen.get().strip():
-            kw["end_screen"] = self.end_screen.get().strip()
+        end_screen = template_for(self.aspect.get(), "end-screen")
+        if end_screen:
+            kw["end_screen"] = end_screen
         if self.output.get().strip():
             kw["output"] = self.output.get().strip()
         return kw
@@ -806,14 +916,12 @@ class ReelTab(RunnerTab):
                          default_input_dir=os.path.join(PROJECT_ROOT, "vertHorizVideo"))
 
     def _build_form(self):
-        self.folder = self.pvar("folder", "")
         self.interval = self.pvar("interval", "2.0")
         self.music_folder = self.pvar(
             "music_folder",
             "/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music",
         )
         self.beats_per_transition = self.pvar("beats_per_transition", "4")
-        self.end_screen = self.pvar("end_screen", DEFAULT_WATERMARK)
         self.output = self.pvar("output", "")
         self.bg = self.pvar("bg", "")
 
@@ -822,13 +930,6 @@ class ReelTab(RunnerTab):
         grid.columnconfigure(1, weight=1)
 
         r = 0
-        ttk.Label(grid, text="Image folder").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.folder).grid(row=r, column=1, sticky="ew", padx=4)
-        ttk.Button(grid, text="Browse...",
-                   command=lambda: pick_dir(self.folder, self.default_input_dir)
-                   ).grid(row=r, column=2)
-        r += 1
-
         ttk.Label(grid, text="Interval per image (seconds)").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.interval, width=10).grid(row=r, column=1, sticky="w", padx=4)
         r += 1
@@ -857,12 +958,6 @@ class ReelTab(RunnerTab):
                    command=lambda: pick_color(self.bg)).grid(row=r, column=2)
         r += 1
 
-        ttk.Label(grid, text="End screen image (optional)").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.end_screen).grid(row=r, column=1, sticky="ew", padx=4)
-        ttk.Button(grid, text="File...", command=self._pick_end_screen
-                   ).grid(row=r, column=2)
-        r += 1
-
         ttk.Label(grid, text="Output file (optional)").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.output).grid(row=r, column=1, sticky="ew", padx=4)
         ttk.Button(grid, text="Save as...", command=self._pick_output
@@ -878,20 +973,6 @@ class ReelTab(RunnerTab):
         )
         if path:
             self.output.set(path)
-
-    def _pick_end_screen(self):
-        current = self.end_screen.get().strip()
-        if current and os.path.isfile(current):
-            initial_dir = os.path.dirname(current)
-        else:
-            initial_dir = os.path.expanduser("~")
-        path = filedialog.askopenfilename(
-            initialdir=initial_dir,
-            filetypes=[("Image", "*.png *.jpg *.jpeg"), ("All files", "*.*")],
-            title="Pick an end screen image",
-        )
-        if path:
-            self.end_screen.set(path)
 
     def _pick_music_file(self):
         current = self.music_folder.get().strip()
@@ -911,9 +992,10 @@ class ReelTab(RunnerTab):
             self.music_folder.set(path)
 
     def _gather_kwargs(self):
-        if not self.folder.get().strip():
-            raise ValueError("Pick an image folder.")
-        kw = {"folder": self.folder.get().strip()}
+        folder = _current_image_folder()
+        if not folder:
+            raise ValueError("Pick an images folder in the project bar.")
+        kw = {"folder": folder}
         if self.interval.get().strip():
             try:
                 kw["interval"] = float(self.interval.get())
@@ -925,8 +1007,10 @@ class ReelTab(RunnerTab):
             kw["bg"] = self.bg.get().strip()
         if self.music_folder.get().strip():
             kw["music"] = self.music_folder.get().strip()
-        if self.end_screen.get().strip():
-            kw["end_screen"] = self.end_screen.get().strip()
+        # Reels are vertical — resolve the 9:16 end-screen template.
+        end_screen = template_for("9:16", "end-screen")
+        if end_screen:
+            kw["end_screen"] = end_screen
         if self.beats_per_transition.get().strip():
             try:
                 bpt = int(self.beats_per_transition.get())
@@ -952,7 +1036,6 @@ class WallsTab(RunnerTab):
 
     def _build_form(self):
         self.wall_folder = self.pvar("wall_folder", WALLS_DIR)
-        self.image_folder = self.pvar("image_folder", "")
         self.num_outputs = self.pvar("num_outputs", "10")
         self.output_dir = self.pvar("output_dir", "")
 
@@ -965,13 +1048,6 @@ class WallsTab(RunnerTab):
         ttk.Entry(grid, textvariable=self.wall_folder).grid(row=r, column=1, sticky="ew", padx=4)
         ttk.Button(grid, text="Browse...",
                    command=lambda: pick_dir(self.wall_folder, self.default_input_dir)
-                   ).grid(row=r, column=2)
-        r += 1
-
-        ttk.Label(grid, text="Image folder").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.image_folder).grid(row=r, column=1, sticky="ew", padx=4)
-        ttk.Button(grid, text="Browse...",
-                   command=lambda: pick_dir(self.image_folder, self.default_input_dir)
                    ).grid(row=r, column=2)
         r += 1
 
@@ -991,10 +1067,11 @@ class WallsTab(RunnerTab):
                   foreground="gray").grid(row=r, column=0, columnspan=3, sticky="w")
 
     def _gather_kwargs(self):
+        image_folder = _current_image_folder()
         if not self.wall_folder.get().strip():
             raise ValueError("Pick a wall folder.")
-        if not self.image_folder.get().strip():
-            raise ValueError("Pick an image folder.")
+        if not image_folder:
+            raise ValueError("Pick an images folder in the project bar.")
         if not self.num_outputs.get().strip():
             raise ValueError("Enter the number of outputs.")
         try:
@@ -1005,7 +1082,7 @@ class WallsTab(RunnerTab):
             raise ValueError("Number of outputs must be at least 1.")
         kw = {
             "wall_folder": self.wall_folder.get().strip(),
-            "image_folder": self.image_folder.get().strip(),
+            "image_folder": image_folder,
             "num_outputs": n,
         }
         if self.output_dir.get().strip():
@@ -1025,7 +1102,6 @@ class SplitTab(RunnerTab):
                          default_input_dir=PROJECT_ROOT)
 
     def _build_form(self):
-        self.folder = self.pvar("folder", "")
         self.aspect_ratio = self.pvar("aspect_ratio", "9:16")
         self.output_dir = self.pvar("output_dir", "")
         self.bg = self.pvar("bg", "")
@@ -1035,13 +1111,6 @@ class SplitTab(RunnerTab):
         grid.columnconfigure(1, weight=1)
 
         r = 0
-        ttk.Label(grid, text="Input folder").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.folder).grid(row=r, column=1, sticky="ew", padx=4)
-        ttk.Button(grid, text="Browse...",
-                   command=lambda: pick_dir(self.folder, self.default_input_dir)
-                   ).grid(row=r, column=2)
-        r += 1
-
         ttk.Label(grid, text="Aspect ratio").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Combobox(grid, textvariable=self.aspect_ratio,
                      values=list(split_mod.ASPECT_RATIOS.keys()),
@@ -1070,10 +1139,11 @@ class SplitTab(RunnerTab):
                   ).grid(row=r, column=0, columnspan=3, sticky="w")
 
     def _gather_kwargs(self):
-        if not self.folder.get().strip():
-            raise ValueError("Pick an input folder.")
+        folder = _current_image_folder()
+        if not folder:
+            raise ValueError("Pick an images folder in the project bar.")
         kw = {
-            "folder": self.folder.get().strip(),
+            "folder": folder,
             "aspect_ratio": self.aspect_ratio.get(),
         }
         if self.output_dir.get().strip():
@@ -1095,8 +1165,6 @@ class KenBurnsTab(RunnerTab):
                          default_input_dir=PROJECT_ROOT)
 
     def _build_form(self):
-        self.project_name = self.pvar("project_name", "")
-        self.folder = self.pvar("folder", "")
         self.num_images = self.pvar("num_images", "20")
         self.aspect = self.pvar("aspect", "16:9")
         self.duration = self.pvar("duration", "4.0")
@@ -1107,32 +1175,17 @@ class KenBurnsTab(RunnerTab):
         )
         self.gimmick = self.pvar("gimmick", False, tk.BooleanVar)
         self.random_order = self.pvar("random_order", True, tk.BooleanVar)
-        self.end_screen = self.pvar("end_screen", DEFAULT_WATERMARK)
         self.title = self.pvar("title", "")
         self.subtitle = self.pvar("subtitle", "")
         self.title_font = self.pvar("title_font", "")
         self.subtitle_font = self.pvar("subtitle_font", "")
         self.text_slide_font = self.pvar("text_slide_font", "")
-        self.title_screen = self.pvar("title_screen", "")
 
         grid = ttk.Frame(self)
         grid.pack(fill="x")
         grid.columnconfigure(1, weight=1)
 
         r = 0
-        ttk.Label(grid, text="Project name (optional)"
-                  ).grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.project_name
-                  ).grid(row=r, column=1, sticky="ew", padx=4)
-        r += 1
-
-        ttk.Label(grid, text="Image folder").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.folder).grid(row=r, column=1, sticky="ew", padx=4)
-        ttk.Button(grid, text="Browse...",
-                   command=lambda: pick_dir(self.folder, self.default_input_dir)
-                   ).grid(row=r, column=2)
-        r += 1
-
         ttk.Label(grid, text="Number of images").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.num_images, width=10
                   ).grid(row=r, column=1, sticky="w", padx=4)
@@ -1184,14 +1237,6 @@ class KenBurnsTab(RunnerTab):
         ttk.Entry(grid, textvariable=self.title).grid(row=r, column=1, sticky="ew", padx=4)
         r += 1
 
-        ttk.Label(grid, text="Title screen image (optional)"
-                  ).grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.title_screen
-                  ).grid(row=r, column=1, sticky="ew", padx=4)
-        ttk.Button(grid, text="File...", command=self._pick_title_screen
-                   ).grid(row=r, column=2)
-        r += 1
-
         ttk.Label(grid, text="Title font (optional)"
                   ).grid(row=r, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.title_font
@@ -1236,17 +1281,13 @@ class KenBurnsTab(RunnerTab):
                    ).grid(row=r, column=2)
         r += 1
 
-        ttk.Label(grid, text="End screen image (optional)").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.end_screen).grid(row=r, column=1, sticky="ew", padx=4)
-        ttk.Button(grid, text="File...", command=self._pick_end_screen
-                   ).grid(row=r, column=2)
-        r += 1
-
         ttk.Label(grid,
                   text="(16:9 picks landscape images, 9:16 picks portrait. "
-                       "Video is written into the image folder — set Project name "
-                       "for a custom stem.)",
-                  foreground="gray").grid(row=r, column=0, columnspan=3, sticky="w")
+                       "Title/end screens come from assets/templates/<aspect>/. "
+                       "Video is written into the image folder; the current "
+                       "project name is used as the output filename stem.)",
+                  foreground="gray", wraplength=560, justify="left"
+                  ).grid(row=r, column=0, columnspan=3, sticky="w")
 
     def _pick_music_file(self):
         current = self.music.get().strip()
@@ -1265,37 +1306,15 @@ class KenBurnsTab(RunnerTab):
         if path:
             self.music.set(path)
 
-    def _pick_end_screen(self):
-        current = self.end_screen.get().strip()
-        if current and os.path.isfile(current):
-            initial_dir = os.path.dirname(current)
-        else:
-            initial_dir = WATERMARKS_DIR
-        path = filedialog.askopenfilename(
-            initialdir=initial_dir,
-            filetypes=[("Image", "*.png *.jpg *.jpeg"), ("All files", "*.*")],
-            title="Pick an end screen image",
-        )
-        if path:
-            self.end_screen.set(path)
-
     def _save_text_slides(self, _event=None):
         value = self.text_slides_widget.get("1.0", "end-1c")
         _store.set(f"{self.persist_prefix}.text_slides", value)
 
-    def _pick_title_screen(self):
-        current = self.title_screen.get().strip()
-        if current and os.path.isfile(current):
-            initial_dir = os.path.dirname(current)
-        else:
-            initial_dir = WATERMARKS_DIR
-        path = filedialog.askopenfilename(
-            initialdir=initial_dir,
-            filetypes=[("Image", "*.png *.jpg *.jpeg"), ("All files", "*.*")],
-            title="Pick a title screen image",
-        )
-        if path:
-            self.title_screen.set(path)
+    def _reload_extras(self):
+        self.text_slides_widget.delete("1.0", "end")
+        saved = _store.get(f"{self.persist_prefix}.text_slides", "")
+        if saved:
+            self.text_slides_widget.insert("1.0", saved)
 
     def _pick_font(self, var):
         current = var.get().strip()
@@ -1315,8 +1334,9 @@ class KenBurnsTab(RunnerTab):
             var.set(path)
 
     def _gather_kwargs(self):
-        if not self.folder.get().strip():
-            raise ValueError("Pick an image folder.")
+        folder = _current_image_folder()
+        if not folder:
+            raise ValueError("Pick an images folder in the project bar.")
         try:
             n = int(self.num_images.get())
         except ValueError:
@@ -1337,7 +1357,7 @@ class KenBurnsTab(RunnerTab):
             raise ValueError("Ken Burns strength must be in 0..100.")
 
         kw = {
-            "folder": self.folder.get().strip(),
+            "folder": folder,
             "num_images": n,
             "aspect": self.aspect.get(),
             "duration_per_image": dur,
@@ -1348,8 +1368,12 @@ class KenBurnsTab(RunnerTab):
             kw["music"] = self.music.get().strip()
         if self.gimmick.get():
             kw["gimmick"] = True
-        if self.end_screen.get().strip():
-            kw["end_screen"] = self.end_screen.get().strip()
+        end_screen = template_for(self.aspect.get(), "end-screen")
+        if end_screen:
+            kw["end_screen"] = end_screen
+        title_screen = template_for(self.aspect.get(), "title-screen")
+        if title_screen:
+            kw["title_screen"] = title_screen
         if self.title.get().strip():
             kw["title"] = self.title.get().strip()
         if self.subtitle.get().strip():
@@ -1360,8 +1384,6 @@ class KenBurnsTab(RunnerTab):
             kw["subtitle_font"] = self.subtitle_font.get().strip()
         if self.text_slide_font.get().strip():
             kw["text_slide_font"] = self.text_slide_font.get().strip()
-        if self.title_screen.get().strip():
-            kw["title_screen"] = self.title_screen.get().strip()
         text_lines = [
             line.strip()
             for line in self.text_slides_widget.get("1.0", "end-1c").splitlines()
@@ -1369,8 +1391,7 @@ class KenBurnsTab(RunnerTab):
         ]
         if text_lines:
             kw["text_slides"] = text_lines
-        if self.project_name.get().strip():
-            kw["project_name"] = self.project_name.get().strip()
+        kw["project_name"] = _store.current_project
         return kw
 
 
@@ -1378,10 +1399,114 @@ class KenBurnsTab(RunnerTab):
 # Main
 # ---------------------------------------------------------------------------
 
+_PROJECT_NAME_RE = re.compile(r"^[\w\- ]+$")
+
+
+def _prompt_project_name(parent, title, prompt, initial=""):
+    while True:
+        name = simpledialog.askstring(
+            title, prompt, parent=parent, initialvalue=initial)
+        if name is None:
+            return None
+        name = name.strip()
+        if not name:
+            messagebox.showerror(title, "Name cannot be empty.", parent=parent)
+            continue
+        if not _PROJECT_NAME_RE.match(name):
+            messagebox.showerror(
+                title,
+                "Use letters, digits, spaces, dashes and underscores only.",
+                parent=parent)
+            continue
+        if name in _store.list_projects():
+            messagebox.showerror(
+                title, f"Project '{name}' already exists.", parent=parent)
+            continue
+        return name
+
+
+def _build_project_bar(root):
+    outer = ttk.Frame(root, padding=(8, 6, 8, 0))
+    outer.pack(fill="x")
+
+    # Row 1: project dropdown + clone/delete buttons.
+    top = ttk.Frame(outer)
+    top.pack(fill="x")
+    ttk.Label(top, text="Project:").pack(side="left")
+
+    current = tk.StringVar(value=_store.current_project)
+    combo = ttk.Combobox(top, textvariable=current, state="readonly",
+                         values=_store.list_projects(), width=28)
+    combo.pack(side="left", padx=(6, 8))
+
+    _syncing = {"v": False}  # guard so combo/store don't ping-pong
+
+    def on_pick(_evt=None):
+        if _syncing["v"]:
+            return
+        name = current.get()
+        if name and name != _store.current_project:
+            _store.switch_project(name)
+
+    def on_store_change():
+        _syncing["v"] = True
+        try:
+            combo.configure(values=_store.list_projects())
+            current.set(_store.current_project)
+        finally:
+            _syncing["v"] = False
+
+    _store.add_listener(on_store_change)
+    combo.bind("<<ComboboxSelected>>", on_pick)
+
+    def on_clone():
+        name = _prompt_project_name(
+            root, "Clone project",
+            f"Clone '{_store.current_project}' to a new project named:")
+        if name is None:
+            return
+        try:
+            _store.clone_project(name)
+        except ValueError as e:
+            messagebox.showerror("Clone project", str(e), parent=root)
+
+    def on_delete():
+        target = _store.current_project
+        if len(_store.list_projects()) <= 1:
+            messagebox.showinfo(
+                "Delete project",
+                "Cannot delete the last remaining project.",
+                parent=root)
+            return
+        if not messagebox.askyesno(
+                "Delete project",
+                f"Delete project '{target}'?\nThis cannot be undone.",
+                parent=root):
+            return
+        _store.delete_project(target)
+
+    ttk.Button(top, text="Clone...", command=on_clone).pack(side="left")
+    ttk.Button(top, text="Delete", command=on_delete).pack(side="left",
+                                                            padx=(6, 0))
+
+    # Row 2: shared image folder for the current project.
+    folder_var = _make_global_folder_var()
+    row2 = ttk.Frame(outer)
+    row2.pack(fill="x", pady=(6, 0))
+    ttk.Label(row2, text="Images").pack(side="left")
+    entry = ttk.Entry(row2, textvariable=folder_var)
+    entry.pack(side="left", fill="x", expand=True, padx=(6, 6))
+    ttk.Button(row2, text="Browse...",
+               command=lambda: pick_dir(folder_var, PROJECT_ROOT)
+               ).pack(side="left")
+
+
 def main():
     root = tk.Tk()
     root.title("Markus Voelter Photography - Photo Tools")
-    root.geometry("900x680")
+    root.geometry("900x720")
+
+    _build_project_bar(root)
 
     nb = ttk.Notebook(root)
     nb.pack(fill="both", expand=True, padx=8, pady=8)

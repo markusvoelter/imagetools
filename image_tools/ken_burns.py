@@ -1057,33 +1057,30 @@ def run(*, folder, num_images=20, aspect="16:9",
     if gimmick and gimmick_duration > 0 and gimmick_frames_list:
         # Damped impulse at the start of every gimmick interval — a low-freq
         # tonal "thump" mixed with white noise gives a darker, spoke-like
-        # click rather than a sine beep. Because per-image durations vary
-        # (2× → 1× speed ramp), tau can't be a fixed mod(); instead we
-        # build a nested-if chain that resets tau = t - image_start at each
-        # image boundary. Abruptly cut to silence when the gimmick ends.
-        def _click_wave(tau_expr):
-            envelope = (f"{GIMMICK_CLICK_AMP}"
-                        f"*exp(-({tau_expr})/{GIMMICK_CLICK_DECAY_S})")
-            waveform = (
-                f"((2*random(0)-1)*{GIMMICK_CLICK_NOISE_WEIGHT}"
-                f"+cos(2*PI*{GIMMICK_CLICK_FREQ_HZ}*({tau_expr}))"
+        # click rather than a sine beep. Each click is expressed as a gated
+        # decay term and the whole track is the SUM of these terms; a naive
+        # nested-if chain overflows ffmpeg's expression parser once you get
+        # past ~50 images, so we keep the expression flat instead. `max(0,
+        # t-start)` guards the exp envelope from blowing up outside a click's
+        # window (the between() gate is 0 there and would otherwise multiply
+        # by exp(+huge) → inf → NaN).
+        boundaries = list(click_starts) + [click_end_boundary]
+
+        def _click_term(start, end):
+            tau = f"max(0,t-{start:.4f})"
+            return (
+                f"between(t,{start:.4f},{end:.4f})"
+                f"*{GIMMICK_CLICK_AMP}*exp(-{tau}/{GIMMICK_CLICK_DECAY_S})"
+                f"*((2*random(0)-1)*{GIMMICK_CLICK_NOISE_WEIGHT}"
+                f"+cos(2*PI*{GIMMICK_CLICK_FREQ_HZ}*{tau})"
                 f"*{GIMMICK_CLICK_TONE_WEIGHT})"
             )
-            return f"{envelope}*{waveform}"
 
-        # Boundaries come from the continuous audio schedule, not the
-        # frame-quantized image list, so the clicks slow down smoothly.
-        boundaries = list(click_starts) + [click_end_boundary]
-        click_expr = "0"
-        for i in reversed(range(n)):
-            end = boundaries[i + 1]
-            click = _click_wave(f"(t-{boundaries[i]:.4f})")
-            click_expr = f"if(lt(t,{end:.4f}),{click},{click_expr})"
-        # Silence before the first click; guards the click envelope's
-        # exp(-tau/decay) from evaluating with negative tau (would spike)
-        # when the first click doesn't start at t=0 (e.g. n=1 case).
-        if boundaries[0] > 0:
-            click_expr = f"if(gte(t,{boundaries[0]:.4f}),{click_expr},0)"
+        terms = [
+            _click_term(boundaries[i], boundaries[i + 1])
+            for i in range(n)
+        ]
+        click_expr = "+".join(terms) if terms else "0"
         filter_complex_parts.append(
             f"aevalsrc=exprs='{click_expr}|{click_expr}':"
             f"d={total_seconds:.3f}:s=44100[clicks]"
