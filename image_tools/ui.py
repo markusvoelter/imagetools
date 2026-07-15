@@ -1175,6 +1175,8 @@ class KenBurnsTab(RunnerTab):
         )
         self.gimmick = self.pvar("gimmick", False, tk.BooleanVar)
         self.random_order = self.pvar("random_order", True, tk.BooleanVar)
+        self.start_at_crop = self.pvar("start_at_crop", False, tk.BooleanVar)
+        self.debug = self.pvar("debug", False, tk.BooleanVar)
         self.title = self.pvar("title", "")
         self.subtitle = self.pvar("subtitle", "")
         self.title_font = self.pvar("title_font", "")
@@ -1197,9 +1199,12 @@ class KenBurnsTab(RunnerTab):
                      state="readonly").grid(row=r, column=1, sticky="w", padx=4)
         r += 1
 
-        ttk.Label(grid, text="Duration per image (s)").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.duration, width=10
-                  ).grid(row=r, column=1, sticky="w", padx=4)
+        self.duration_label = ttk.Label(grid, text="Duration per image (s)")
+        self.duration_label.grid(row=r, column=0, sticky="w", pady=2)
+        self.duration_entry = ttk.Entry(grid, textvariable=self.duration, width=10)
+        self.duration_entry.grid(row=r, column=1, sticky="w", padx=4)
+        self.duration_hint = ttk.Label(grid, text="", foreground="gray")
+        self.duration_hint.grid(row=r, column=2, sticky="w", padx=4)
         r += 1
 
         ttk.Label(grid, text="Ken Burns strength %").grid(row=r, column=0, sticky="w", pady=2)
@@ -1230,6 +1235,20 @@ class KenBurnsTab(RunnerTab):
         ttk.Checkbutton(grid,
                         text="Random order (off = alphabetical by filename)",
                         variable=self.random_order
+                        ).grid(row=r, column=0, columnspan=3, sticky="w", pady=2)
+        r += 1
+
+        ttk.Checkbutton(grid,
+                        text="Start at crop (use the 'crop' event in the "
+                             "sidecar JSON as t=0)",
+                        variable=self.start_at_crop
+                        ).grid(row=r, column=0, columnspan=3, sticky="w", pady=2)
+        r += 1
+
+        ttk.Checkbutton(grid,
+                        text="Debug (overlay live music/JSON state on the "
+                             "rendered video)",
+                        variable=self.debug
                         ).grid(row=r, column=0, columnspan=3, sticky="w", pady=2)
         r += 1
 
@@ -1288,6 +1307,32 @@ class KenBurnsTab(RunnerTab):
                        "project name is used as the output filename stem.)",
                   foreground="gray", wraplength=560, justify="left"
                   ).grid(row=r, column=0, columnspan=3, sticky="w")
+
+        self.music.trace_add("write", lambda *_: self._refresh_duration_state())
+        self._refresh_duration_state()
+
+    def _refresh_duration_state(self):
+        """If the music path points to a file with a sidecar JSON containing
+        bar timestamps, grey out the duration Entry (image durations will
+        come from the JSON) and show a hint. Otherwise re-enable it."""
+        music = self.music.get().strip()
+        bars_active = False
+        if music and os.path.isfile(music):
+            json_path = os.path.splitext(music)[0] + ".json"
+            if os.path.isfile(json_path):
+                try:
+                    with open(json_path) as f:
+                        data = json.load(f)
+                    bars = data.get("bars") or []
+                    bars_active = sum(1 for b in bars if "time" in b) >= 2
+                except (OSError, ValueError):
+                    bars_active = False
+        if bars_active:
+            self.duration_entry.state(["disabled"])
+            self.duration_hint.configure(text="(using bar timings from sidecar JSON)")
+        else:
+            self.duration_entry.state(["!disabled"])
+            self.duration_hint.configure(text="")
 
     def _pick_music_file(self):
         current = self.music.get().strip()
@@ -1363,6 +1408,8 @@ class KenBurnsTab(RunnerTab):
             "duration_per_image": dur,
             "kb_strength": pct / 100.0,
             "random_order": self.random_order.get(),
+            "start_at_crop": self.start_at_crop.get(),
+            "debug": self.debug.get(),
         }
         if self.music.get().strip():
             kw["music"] = self.music.get().strip()

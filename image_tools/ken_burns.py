@@ -8,8 +8,10 @@ no flat color shows through. Consecutive images are stitched with a brief
 crossfade.
 """
 
+import json
 import math
 import os
+import platform
 import random
 import re
 import subprocess
@@ -23,6 +25,20 @@ from . import RunContext
 
 FPS = 30
 DEFAULT_DURATION = 4.0
+MIN_IMAGE_DURATION_S = 0.35  # bar-timed images below this get absorbed by a
+# neighbour. Kept just above CROSSFADE_S (0.3): a segment shorter than one
+# crossfade can't complete its transition, so only those degenerate slivers
+# merge — every real musical bar (typically >=0.5s apart) drives a change.
+SHORT_SLIDE_MAX_S = 0.7  # bar-timed images on screen shorter than this render
+# as a hard cut (no crossfade) with no Ken Burns motion: a fade + zoom that
+# brief reads as a flickery smear, so a crisp static snap looks better.
+FLASH_DURATION_S = 0.025       # per-flash-event overlay hold time
+FLASH_BRIGHTNESS_FACTOR = 3.0  # a flash brightens the current image by this
+# factor (blown-out highlights, shadow detail kept) instead of going pure white
+QUIET_FADE_IN_FRACTION = 0.375  # fade-IN duration as fraction of quiet length; span is [T_q, T_q+dur]
+QUIET_RESTART_FADE_S = 0.15    # fixed short fade-OUT ending exactly at T_r
+BLACK_FADE_IN_EXP = 5.0        # curvature of the fade-TO-black; >0 darkens
+# faster at the start of the fade (blacker sooner), 0 = linear.
 DEFAULT_KB_STRENGTH = 0.5     # 0..1
 MAX_ZOOM_AT_FULL_STRENGTH = 0.5  # strength=1.0 → up to 1.5x zoom
 MAX_ROTATION_DEG = 7.5        # strength=1.0 → rotations sampled in ±MAX_ROTATION_DEG
@@ -100,6 +116,504 @@ ASPECTS = {
     "16:9": (1920, 1080),
     "9:16": (1080, 1920),
 }
+
+
+def _load_bar_data(audio_path, start_at_crop=False):
+    """Load bar timing and event structure from a sidecar JSON, or None.
+
+    Returns a dict with:
+      bar_times:     sorted list of bar timestamps (music seconds).
+      quiet_ranges:  [(T_q, T_r)] pairs — quieting → restart.
+      extend_ranges: [(T_s, T_e)] pairs — extend → next event (any kind).
+      glow_ranges:   [(T_s, T_e)] pairs — glow → next event (any kind).
+      flash_times:   [T] — each flash lasts FLASH_DURATION_S from T.
+      events:        raw sorted list of {"time", "kind"}.
+      crop_offset_s: seconds skipped from the audio start (0 if not cropped).
+
+    If `start_at_crop=True` and the JSON has a "crop" event, all bar times
+    and event times are rebased so the crop moment becomes t=0; anything
+    before that is dropped, and the audio input will be seeked forward by
+    the same offset (see caller). The extend/glow "next event" falls back
+    to bar_times[-1] if no later event exists. Any parse failure returns
+    None.
+    """
+    if not audio_path:
+        return None
+    json_path = os.path.splitext(audio_path)[0] + ".json"
+    if not os.path.isfile(json_path):
+        return None
+    try:
+        with open(json_path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    bars = data.get("bars") or []
+    times = []
+    muted_times = []
+    manual_times = []
+    for b in bars:
+        try:
+            t = float(b["time"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        is_manual = b.get("manual") is True
+        if b.get("muted") is True and not is_manual:
+            muted_times.append(t)
+        else:
+            times.append(t)
+            if is_manual:
+                manual_times.append(t)
+    if len(times) < 2:
+        return None
+
+    raw_events = data.get("events") or []
+    events = []
+    for e in raw_events:
+        try:
+            t = float(e["time"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        kind = str(e.get("kind", "")).strip()
+        if not kind:
+            continue
+        events.append({"time": t, "kind": kind})
+    events.sort(key=lambda e: e["time"])
+
+    crop_offset_s = 0.0
+    if start_at_crop:
+        for e in events:
+            if e["kind"] == "crop":
+                crop_offset_s = e["time"]
+                break
+        if crop_offset_s > 0:
+            times = [t - crop_offset_s for t in times if t >= crop_offset_s]
+            if len(times) < 2:
+                return None
+            muted_times = [t - crop_offset_s for t in muted_times
+                           if t >= crop_offset_s]
+            manual_times = [t - crop_offset_s for t in manual_times
+                            if t >= crop_offset_s]
+            events = [{"time": e["time"] - crop_offset_s, "kind": e["kind"]}
+                      for e in events
+                      if e["time"] >= crop_offset_s and e["kind"] != "crop"]
+
+    bar_times = sorted(times)
+    muted_bar_times = sorted(muted_times)
+    all_event_ts = [e["time"] for e in events]
+
+    def _times_of(kind):
+        return [e["time"] for e in events if e["kind"] == kind]
+
+    quieting_ts = _times_of("quieting")
+    restart_ts = _times_of("restart")
+    quiet_ranges = []
+    r_idx = 0
+    for q in quieting_ts:
+        while r_idx < len(restart_ts) and restart_ts[r_idx] <= q:
+            r_idx += 1
+        if r_idx >= len(restart_ts):
+            break
+        quiet_ranges.append((q, restart_ts[r_idx]))
+        r_idx += 1
+
+    fallback_end = bar_times[-1]
+
+    def _next_after(t):
+        for et in all_event_ts:
+            if et > t:
+                return et
+        return fallback_end
+
+    extend_ranges = [(t, _next_after(t)) for t in _times_of("extend")]
+    glow_ranges = [(t, _next_after(t)) for t in _times_of("glow")]
+    flash_times = _times_of("flash")
+
+    return {
+        "bar_times": bar_times,
+        "muted_bar_times": muted_bar_times,
+        "muted_bar_count": len(muted_bar_times),
+        "manual_bar_times": sorted(manual_times),
+        "quiet_ranges": quiet_ranges,
+        "extend_ranges": extend_ranges,
+        "glow_ranges": glow_ranges,
+        "flash_times": flash_times,
+        "events": events,
+        "crop_offset_s": crop_offset_s,
+    }
+
+
+def _compute_overlay_windows(bar_data, image_onset_s, bar_first_s,
+                             flash_duration_s, quiet_fade_in_fraction,
+                             quiet_restart_fade_s):
+    """Translate flash/glow/quiet events into per-frame overlay windows.
+
+    Returns (flash_windows, glow_ramps, quiet_windows) all in video-time
+    seconds.
+
+    - Each quiet event scales its FADE-IN duration to its own length. The
+      fade-in is *asymmetric*, starting at T_q (not centered on it): black
+      α ramps 0→1 across [T_q, T_q + fade_in_dur] where fade_in_dur =
+      quiet_fade_in_fraction · L. This makes the picture stay fully
+      visible until the music actually goes quiet.
+    - For very short quiets we clamp fade-in duration so it doesn't
+      overlap the fade-out.
+    - The FADE-OUT is a fixed short asymmetric ramp ending exactly at
+      T_r — the restart feels near-instantaneous.
+    - `glow_ramps` entries are (ramp_start, ramp_end, hold_end): for a
+      glow whose next event is a quieting, hold_end extends through the
+      quiet's fade-in so white α stays opaque until black α reaches 1.
+      Otherwise `hold_end == ramp_end`.
+    - `quiet_windows` entries are (fi_s, fi_e, fo_s, fo_e).
+    """
+    def m2v(t):
+        return image_onset_s + (t - bar_first_s)
+
+    # Per-quiet fade-in duration, clamped so it never encroaches on the
+    # fade-out span (matters only for very short quiet events).
+    quiet_fade_in_dur = {}
+    for s, e in bar_data["quiet_ranges"]:
+        L = e - s
+        max_fade_in = max(0.0, L - quiet_restart_fade_s)
+        quiet_fade_in_dur[s] = min(quiet_fade_in_fraction * L, max_fade_in)
+
+    flash_windows = [(m2v(t), m2v(t + flash_duration_s))
+                     for t in bar_data["flash_times"]]
+
+    glow_ramps = []
+    for s, e in bar_data["glow_ranges"]:
+        ramp_end_v = m2v(e)
+        chained_dur = None
+        for qt, dur in quiet_fade_in_dur.items():
+            if abs(qt - e) < 1e-6:
+                chained_dur = dur
+                break
+        # If a glow ends exactly where a quiet starts, hold white α=1 all
+        # the way through the quiet's fade-in — otherwise the image would
+        # peek through between the glow snapping off and black reaching 1.
+        hold_end_v = (m2v(e + chained_dur) if chained_dur is not None
+                      else ramp_end_v)
+        glow_ramps.append((m2v(s), ramp_end_v, hold_end_v))
+
+    quiet_windows = []
+    for s, e in bar_data["quiet_ranges"]:
+        dur = quiet_fade_in_dur[s]
+        quiet_windows.append((
+            m2v(s), m2v(s + dur),                       # fade-in
+            m2v(e - quiet_restart_fade_s), m2v(e),      # fade-out
+        ))
+    return flash_windows, glow_ramps, quiet_windows
+
+
+def _ease_black_in(p, k=BLACK_FADE_IN_EXP):
+    """Map linear fade progress p in [0,1] to black opacity, curved so the
+    picture darkens faster near the start of the fade (concave). k > 0 sets
+    the curvature; k -> 0 degrades to linear."""
+    if k <= 1e-9:
+        return p
+    return (1.0 - math.exp(-k * p)) / (1.0 - math.exp(-k))
+
+
+def _overlay_at(t, flash_windows, glow_ramps, quiet_windows):
+    """Return (flash_alpha, glow_alpha, black_alpha) at video time `t`.
+
+    flash_alpha drives a brightened-image pop; glow_alpha drives the white
+    glow ramp; black_alpha drives the fade-to-black. They're returned
+    separately because a flash and a glow render differently."""
+    flash_alpha = 0.0
+    for s, e in flash_windows:
+        if s <= t <= e:
+            flash_alpha = 1.0
+            break
+    glow_alpha = 0.0
+    for ramp_start, ramp_end, hold_end in glow_ramps:
+        if ramp_start <= t <= hold_end:
+            if t <= ramp_end:
+                span = ramp_end - ramp_start
+                local = ((t - ramp_start) / span
+                         if span > 1e-9 else 1.0)
+            else:
+                local = 1.0
+            if local > glow_alpha:
+                glow_alpha = local
+    black_alpha = 0.0
+    for fi_s, fi_e, fo_s, fo_e in quiet_windows:
+        if fi_s <= t <= fo_e:
+            if t <= fi_e:
+                span = fi_e - fi_s
+                black_alpha = (_ease_black_in((t - fi_s) / span)
+                               if span > 1e-9 else 1.0)
+            elif t <= fo_s:
+                black_alpha = 1.0
+            else:
+                span = fo_e - fo_s
+                black_alpha = 1.0 - (t - fo_s) / span if span > 1e-9 else 0.0
+            break
+    if black_alpha < 0.0:
+        black_alpha = 0.0
+    elif black_alpha > 1.0:
+        black_alpha = 1.0
+    return flash_alpha, glow_alpha, black_alpha
+
+
+def _merge_tiny_image_segments(segments, min_duration_s):
+    """Absorb image segments shorter than `min_duration_s` into an adjacent
+    image, so no picture flashes by too briefly to recognise.
+
+    Direction:
+      - Default: merge into the previous image (extend its end into the
+        tiny segment). Keeps the "keep showing the picture I was showing"
+        feel for bar-driven tiny segments.
+      - If the tiny segment was born from a quiet's synthetic cut
+        (`from_cut=True`), prefer merging FORWARD into the next image so
+        the picture emerging from black is the *new* one, not the pre-quiet
+        one. The `from_cut` flag propagates onto the target so cascading
+        tiny segments keep flowing forward.
+    """
+    result = list(segments)
+    i = 0
+    while i < len(result):
+        seg = result[i]
+        if seg["kind"] != "image":
+            i += 1
+            continue
+        if seg["end"] - seg["start"] >= min_duration_s:
+            i += 1
+            continue
+        if seg.get("manual"):
+            # Manual bars are deliberate picture changes — always keep them,
+            # even when the resulting slot is shorter than min_duration_s.
+            i += 1
+            continue
+        prev = result[i - 1] if i > 0 else None
+        nxt = result[i + 1] if i + 1 < len(result) else None
+        prefer_next = seg.get("from_cut", False)
+
+        def merge_into_prev():
+            result[i - 1] = {**prev, "end": seg["end"]}
+            del result[i]
+
+        def merge_into_next():
+            propagated = (seg.get("from_cut", False)
+                          or nxt.get("from_cut", False))
+            result[i + 1] = {**nxt, "start": seg["start"],
+                             "from_cut": propagated}
+            del result[i]
+
+        def can_prev():
+            return prev is not None and prev["kind"] == "image"
+
+        def can_next():
+            # Never shift a manual segment's start earlier — that would move
+            # its (deliberate) picture-change moment.
+            return (nxt is not None and nxt["kind"] == "image"
+                    and not nxt.get("manual"))
+
+        if prefer_next:
+            if can_next():
+                merge_into_next()
+                continue
+            if can_prev():
+                merge_into_prev()
+                continue
+        else:
+            if can_prev():
+                merge_into_prev()
+                continue
+            if can_next():
+                merge_into_next()
+                continue
+        i += 1
+    return result
+
+
+def _log_music_video_timeline(ctx, bar_data, bar_segments, music_start_s):
+    """Log a chronological view of every music-JSON timestamp with the
+    video consequence, to help debug alignment issues.
+
+    Times shown are music-time (rebased if start_at_crop was used) →
+    video-time. Video time is computed as `music_start_s + t`.
+    """
+    if not bar_data or not bar_segments:
+        return
+
+    half_crossfade = CROSSFADE_S / 2.0
+
+    # Freeze ranges — quiet range is used as-is now that fade-in starts at T_q.
+    freezes = []
+    for s, e in bar_data["quiet_ranges"]:
+        freezes.append((s, e, "quiet"))
+    for s, e in bar_data["extend_ranges"]:
+        freezes.append((s, e, "extend"))
+    for s, e in bar_data["glow_ranges"]:
+        freezes.append((s, e, "glow"))
+
+    def in_freeze(t):
+        for s, e, kind in freezes:
+            if s <= t < e:
+                return kind
+        return None
+
+    # Segment starts are the image-change moments in the rendered video.
+    seg_start_by_time = {}
+    for i, seg in enumerate(bar_segments):
+        seg_start_by_time[round(seg["start"], 6)] = i
+
+    # Synthetic quiet-cut timestamps (mirrors the placement rule used by
+    # _build_bar_segments so the log line matches the actual segment cut).
+    cut_times = set()
+    for s, e in bar_data["quiet_ranges"]:
+        L = e - s
+        if L < CROSSFADE_S:
+            continue
+        hold_end = e - QUIET_RESTART_FADE_S
+        cut = max(s + half_crossfade, hold_end - half_crossfade)
+        cut_times.add(round(cut, 6))
+
+    # Build entries: (music_time, order_key, kind, description).
+    # order_key breaks ties at the same time (event before bar before cut).
+    entries = []
+
+    for t in bar_data["bar_times"]:
+        key = round(t, 6)
+        if key in seg_start_by_time:
+            img_i = seg_start_by_time[key]
+            if img_i == 0:
+                desc = f"→ image 0 begins"
+            else:
+                desc = f"→ image {img_i - 1} → image {img_i}"
+            entries.append((t, 2, "bar", desc))
+        else:
+            fk = in_freeze(t)
+            if fk:
+                entries.append((t, 2, "bar",
+                                f"CONSUMED (inside {fk} range)"))
+            else:
+                entries.append((t, 2, "bar",
+                                "CONSUMED (absorbed by tiny-merge)"))
+
+    for t in bar_data.get("muted_bar_times", []):
+        entries.append((t, 2, "bar (muted)", "ignored — no picture change"))
+
+    for e in bar_data["events"]:
+        kind = e["kind"]
+        t = e["time"]
+        if kind == "quieting":
+            desc = (f"start fade-to-black, current image held; "
+                    f"synthetic cut hidden inside hold")
+        elif kind == "restart":
+            desc = "end quiet, next image fully visible"
+        elif kind == "extend":
+            desc = "freeze picture until next event"
+        elif kind == "glow":
+            desc = "start white glow, α 0→1 until next event"
+        elif kind == "flash":
+            desc = f"white overlay for {FLASH_DURATION_S:.2f}s"
+        elif kind == "crop":
+            desc = "crop reference (should already be t=0 if rebased)"
+        else:
+            desc = "(unknown event kind)"
+        entries.append((t, 1, kind, desc))
+
+    for ct in cut_times:
+        img_i = seg_start_by_time.get(ct)
+        if img_i is not None:
+            label = (f"→ image {img_i - 1} → image {img_i} "
+                     f"(crossfade under black)")
+        else:
+            label = ("→ new-image slot merged forward "
+                     "(next surviving image emerges from black)")
+        entries.append((ct, 3, "cut", label))
+
+    entries.sort(key=lambda x: (x[0], x[1]))
+
+    ctx.log("Music/video timeline (music_t → video_t):")
+    for mt, _order, kind, desc in entries:
+        vt = music_start_s + mt
+        ctx.log(f"  {mt:8.3f} → {vt:8.3f}  {kind:14s}  {desc}")
+
+
+def _build_bar_segments(bar_data):
+    """Emit image-only segments spanning [bar_times[0], bar_times[-1]].
+
+    Bars falling inside any freeze range (quiet, extend, glow) are
+    consumed — no picture change happens while the underlying image is
+    being held or overlaid.
+
+    Quiet ranges get special treatment beyond the freeze:
+      - The fade-in now starts *at* T_q (asymmetric), so no backward
+        extension of the freeze range is needed — the raw quiet range
+        [T_q, T_r) already covers every frame that shouldn't trigger a
+        picture change.
+      - A synthetic "cut" is injected inside the quiet so a NEW image
+        starts rendering underneath while the overlay is still fully
+        opaque. When the fade-out ramps down at T_r, that new image
+        emerges from black. The segment starting at the cut is tagged
+        `from_cut=True` so `_merge_tiny_image_segments` merges *forward*
+        if it's tiny.
+      - Cut placement: as late as possible (crossfade completes exactly
+        at fade-out start → clean reveal), clamped so the crossfade
+        *start* is never before T_q (never blend before the quiet
+        begins). Skipped for quiets so short there's no room even for
+        the clamped-early cut.
+    """
+    bar_times = bar_data["bar_times"]
+    half_crossfade = CROSSFADE_S / 2.0
+    freeze_ranges = (list(bar_data["quiet_ranges"])
+                     + list(bar_data["extend_ranges"])
+                     + list(bar_data["glow_ranges"]))
+
+    quiet_cuts = []
+    for s, e in bar_data["quiet_ranges"]:
+        L = e - s
+        if L < CROSSFADE_S:
+            # Even the earliest possible cut (T_q + half_crossfade) would
+            # push the crossfade beyond T_r. Not worth doing — skip.
+            continue
+        hold_end = e - QUIET_RESTART_FADE_S
+        # Prefer late cut so image B is fully rendered by fade-out start;
+        # clamp early so cross start ≥ T_q. When the hold is very short
+        # the clamp wins and the crossfade end spills a bit into the
+        # fade-out, but that only masks image B fading up under lifting
+        # black — no old-image leak.
+        cut = max(s + half_crossfade, hold_end - half_crossfade)
+        quiet_cuts.append(cut)
+    quiet_cuts_set = set(quiet_cuts)
+
+    def is_frozen(t):
+        for s, e in freeze_ranges:
+            if s <= t < e:
+                return True
+        return False
+
+    manual_set = {round(t, 6) for t in bar_data.get("manual_bar_times", [])}
+
+    def _seg(start, end, from_cut):
+        return {"kind": "image", "start": start, "end": end,
+                "from_cut": from_cut,
+                "manual": round(start, 6) in manual_set}
+
+    boundaries = sorted(list(bar_times[1:]) + quiet_cuts)
+    segments = []
+    cur_start = bar_times[0]
+    cur_start_from_cut = False
+    for t in boundaries:
+        if t in quiet_cuts_set:
+            # Forced segment boundary inside a quiet's hold phase. The
+            # segment that STARTS here will emerge from black at fade-out.
+            if t > cur_start:
+                segments.append(_seg(cur_start, t, cur_start_from_cut))
+            cur_start = t
+            cur_start_from_cut = True
+        elif is_frozen(t):
+            continue
+        else:
+            if t > cur_start:
+                segments.append(_seg(cur_start, t, cur_start_from_cut))
+            cur_start = t
+            cur_start_from_cut = False
+    if cur_start < bar_times[-1]:
+        segments.append(_seg(cur_start, bar_times[-1], cur_start_from_cut))
+    return segments
 
 
 def _resolve_audio_track(music_path, ctx):
@@ -747,7 +1261,7 @@ def run(*, folder, num_images=20, aspect="16:9",
         title=None, subtitle=None, text_slides=None,
         title_font=None, subtitle_font=None, text_slide_font=None,
         title_screen=None, project_name=None,
-        random_order=True, ctx=None):
+        random_order=True, start_at_crop=False, debug=False, ctx=None):
     """Render the Ken Burns video.
 
     folder              folder of source images
@@ -826,32 +1340,113 @@ def run(*, folder, num_images=20, aspect="16:9",
     n = min(num_images, len(candidates))
     if n < num_images:
         ctx.log(f"Only {n} candidate(s) available; reducing from {num_images}.")
+
+    audio_track = None
+    if music:
+        audio_track = _resolve_audio_track(music, ctx)
+
+    bar_data = _load_bar_data(audio_track, start_at_crop=start_at_crop)
+    bar_segments = None
+    if bar_data is not None:
+        if bar_data.get("crop_offset_s", 0.0) > 0:
+            ctx.log(f"Start-at-crop active: skipping first "
+                    f"{bar_data['crop_offset_s']:.3f}s of audio; "
+                    f"bars/events rebased to t=0 at the crop moment.")
+        elif start_at_crop:
+            ctx.log("Start-at-crop was requested but the sidecar JSON has "
+                    "no crop event — starting from the beginning.")
+        if bar_data["muted_bar_count"]:
+            ctx.log(f"Ignoring {bar_data['muted_bar_count']} muted bar(s) "
+                    f"— no picture change at those times.")
+        bar_segments = _build_bar_segments(bar_data)
+        raw_image_count = len(bar_segments)
+        bar_segments = _merge_tiny_image_segments(
+            bar_segments, MIN_IMAGE_DURATION_S)
+        image_slot_count = len(bar_segments)
+        absorbed = raw_image_count - image_slot_count
+        if absorbed > 0:
+            ctx.log(f"Absorbed {absorbed} tiny image slot(s) "
+                    f"(<{MIN_IMAGE_DURATION_S:.2f}s) into adjacent image(s) "
+                    f"to avoid flash-by pictures.")
+        if bar_data["manual_bar_times"]:
+            ctx.log(f"{len(bar_data['manual_bar_times'])} manual bar(s) kept "
+                    f"as picture changes (exempt from tiny-merge).")
+        freeze_summary = []
+        if bar_data["quiet_ranges"]:
+            freeze_summary.append(f"{len(bar_data['quiet_ranges'])} quiet")
+        if bar_data["extend_ranges"]:
+            freeze_summary.append(f"{len(bar_data['extend_ranges'])} extend")
+        if bar_data["glow_ranges"]:
+            freeze_summary.append(f"{len(bar_data['glow_ranges'])} glow")
+        if n > image_slot_count:
+            extra = (f" (bars during {', '.join(freeze_summary)} range(s) consumed)"
+                     if freeze_summary else "")
+            ctx.log(f"Bar timing provides {image_slot_count} image slot(s)"
+                    f"{extra}; reducing image count from {n}.")
+            n = image_slot_count
+
     # Candidates already come back in the requested order from
     # _collect_images (shuffled or alphabetical), so take the first n.
     picks = candidates[:n]
 
-    # Normalise text_slides: drop blank lines, then cap so at least one image
-    # remains in every chunk (no text at start/end).
+    # Normalise text_slides: drop blank lines.
     text_slides_list = [t.strip() for t in (text_slides or []) if t and t.strip()]
-    max_text = max(0, n - 1)
-    if len(text_slides_list) > max_text:
-        ctx.log(f"Warning: {len(text_slides_list)} text slide(s) requested but "
-                f"only {n} image(s); truncating to {max_text}.")
-        text_slides_list = text_slides_list[:max_text]
+
+    # Two dispositions for text slides:
+    #   quiet-overlay mode: bar_data with quiet ranges present → texts are
+    #     laid over the fade-to-black periods, driven by the black overlay's
+    #     α. Handled in the overlay pipeline (see quiet_text_overlays below).
+    #   sequence mode: no bars, or bars without quiet events → the classic
+    #     between-images text slides inserted into slides_seq.
+    quiet_overlay_texts = []  # [(text, quiet_index)] in quiet-overlay mode
+    if bar_segments is not None:
+        if text_slides_list and bar_data["quiet_ranges"]:
+            n_quiets = len(bar_data["quiet_ranges"])
+            if len(text_slides_list) > n_quiets:
+                ctx.log(f"Warning: {len(text_slides_list)} text slide(s) but "
+                        f"only {n_quiets} quiet range(s); truncating to "
+                        f"{n_quiets}.")
+                text_slides_list = text_slides_list[:n_quiets]
+            # Sequential mapping: text[i] → quiet[i]. Extra quiet ranges
+            # beyond the number of texts stay text-free.
+            for i, t in enumerate(text_slides_list):
+                quiet_overlay_texts.append((t, i))
+            ctx.log(f"Placing {len(text_slides_list)} text slide(s) into the "
+                    f"first {len(text_slides_list)} of {n_quiets} quiet "
+                    f"range(s) as fade-in overlays.")
+            text_slides_list = []  # don't also insert into slides_seq
+        elif text_slides_list:
+            ctx.log(f"Warning: {len(text_slides_list)} text slide(s) requested "
+                    f"but no quiet ranges to overlay them on — dropping.")
+            text_slides_list = []
+    else:
+        max_text = max(0, n - 1)
+        if len(text_slides_list) > max_text:
+            ctx.log(f"Warning: {len(text_slides_list)} text slide(s) requested "
+                    f"but only {n} image(s); truncating to {max_text}.")
+            text_slides_list = text_slides_list[:max_text]
     k_text = len(text_slides_list)
-    # Insertion points: number of images preceding each text slide. Even
-    # distribution divides the n images into k_text+1 chunks of ~equal size.
-    text_positions = [round((j + 1) * n / (k_text + 1)) for j in range(k_text)]
     slides_seq = []
-    img_i = 0
-    for ti, pos in enumerate(text_positions):
-        while img_i < pos:
+    if bar_segments is not None:
+        for img_i, seg in enumerate(bar_segments):
+            if img_i >= n:
+                break
+            slides_seq.append({"kind": "image",
+                               "path": picks[img_i],
+                               "duration_s": seg["end"] - seg["start"]})
+    else:
+        # Insertion points: number of images preceding each text slide. Even
+        # distribution divides the n images into k_text+1 chunks of ~equal size.
+        text_positions = [round((j + 1) * n / (k_text + 1)) for j in range(k_text)]
+        img_i = 0
+        for ti, pos in enumerate(text_positions):
+            while img_i < pos:
+                slides_seq.append({"kind": "image", "path": picks[img_i]})
+                img_i += 1
+            slides_seq.append({"kind": "text", "text": text_slides_list[ti]})
+        while img_i < n:
             slides_seq.append({"kind": "image", "path": picks[img_i]})
             img_i += 1
-        slides_seq.append({"kind": "text", "text": text_slides_list[ti]})
-    while img_i < n:
-        slides_seq.append({"kind": "image", "path": picks[img_i]})
-        img_i += 1
 
     # Optional opening title slide (its own gradient-backed slide; not
     # overlaid on an image). Prepended so it plays first, then crossfades
@@ -888,19 +1483,67 @@ def run(*, folder, num_images=20, aspect="16:9",
     output = os.path.join(folder, f"{stem}.mp4")
     os.makedirs(os.path.dirname(output), exist_ok=True)
 
-    frames_per_image = max(2, int(round(duration_per_image * FPS)))
+    # If a sidecar JSON supplied bar timings, each image slide carries its
+    # own duration_s (from bar diffs, possibly stretched by freeze events).
+    # The UI's duration_per_image value is ignored in that case. Title hold
+    # stays fixed at KB_TITLE_DURATION_S.
+    if bar_segments is not None:
+        image_durations = [s["duration_s"] for s in slides_seq
+                           if s["kind"] == "image"]
+        ref_duration = (sum(image_durations) / max(1, len(image_durations))
+                        if image_durations else duration_per_image)
+    else:
+        image_durations = None
+        ref_duration = duration_per_image
+
+    frames_per_image_ref = max(2, int(round(ref_duration * FPS)))
     crossfade_frames = min(int(round(CROSSFADE_S * FPS)),
-                           frames_per_image // 2)
+                           frames_per_image_ref // 2)
 
-    def _slide_frames(slide):
-        if slide["kind"] == "text":
-            return max(2, int(round(
-                frames_per_image * _text_slide_factor(slide["text"]))))
+    # Per-slide frame counts. Computed from CUMULATIVE video-time positions
+    # so per-slide rounding errors never compound. With the old formula
+    # (`round(dur*FPS + K)` per slide) errors of ~+0.4 frame per slide
+    # would accumulate across dozens of image slides, shifting later
+    # crossfade midpoints hundreds of milliseconds off their target bar
+    # times — and causing a visible "flicker" when the crossfade for a
+    # post-quiet image failed to complete before the fade-out ended.
+    #
+    # By tracking cumulative_end_time in seconds (float) and rounding only
+    # for each slide's end-frame position, the total drift stays bounded
+    # at ±0.5 frame instead of growing.
+    per_slide_frames = []
+    cumulative_end_time = 0.0
+    prev_end_frame = 0
+    n_slides = len(slides_seq)
+    for i, slide in enumerate(slides_seq):
         if slide["kind"] == "title":
-            return max(2, int(round(KB_TITLE_DURATION_S * FPS)))
-        return frames_per_image
+            # Title has no incoming crossfade — its written region shrinks
+            # by K on the outgoing side. Subtracting K/FPS from the on-
+            # screen duration produces fpi_title = TITLE * FPS and puts
+            # slide 1's cross-in midpoint at image_onset_s (= TITLE − K/2FPS).
+            cumulative_end_time += (KB_TITLE_DURATION_S
+                                    - crossfade_frames / FPS)
+        elif slide["kind"] == "text":
+            text_fpi = max(2, int(round(
+                frames_per_image_ref * _text_slide_factor(slide["text"]))))
+            cumulative_end_time += (text_fpi - crossfade_frames) / FPS
+        else:
+            # image; bar-aligned when duration_s is set, else falls back
+            # to the UI's duration_per_image.
+            d = slide.get("duration_s")
+            cumulative_end_time += d if d is not None else duration_per_image
+        end_frame = int(round(cumulative_end_time * FPS))
+        written = end_frame - prev_end_frame
+        if i < n_slides - 1:
+            # Non-last: K tail frames saved for next slide's cross-in.
+            fpi = written + crossfade_frames
+        else:
+            # Last: no tail saving — fpi equals what's actually written.
+            fpi = written
+        per_slide_frames.append(max(2, fpi))
+        prev_end_frame = end_frame
 
-    total_main_frames = (sum(_slide_frames(s) for s in slides_seq)
+    total_main_frames = (sum(per_slide_frames)
                          - (total_slides - 1) * crossfade_frames)
     main_seconds = total_main_frames / FPS
 
@@ -978,6 +1621,41 @@ def run(*, folder, num_images=20, aspect="16:9",
     end_screen_seconds = (end_screen_fade_frames + end_screen_hold_frames) / FPS
     total_seconds = gimmick_duration + main_seconds + end_screen_seconds
 
+    # Once gimmick_duration + per_slide_frames are known, we can locate the
+    # perceptual onset of image[0] in the video timeline. That anchor
+    # translates every music-time timestamp (bars + events) into video time.
+    if bar_data is not None:
+        if title_label:
+            image_onset_s = gimmick_duration + (
+                per_slide_frames[0] - crossfade_frames / 2.0) / FPS
+        else:
+            image_onset_s = gimmick_duration
+        flash_windows, glow_ramps, quiet_windows = _compute_overlay_windows(
+            bar_data, image_onset_s, bar_data["bar_times"][0],
+            FLASH_DURATION_S, QUIET_FADE_IN_FRACTION,
+            QUIET_RESTART_FADE_S)
+    else:
+        image_onset_s = 0.0
+        flash_windows = []
+        glow_ramps = []
+        quiet_windows = []
+
+    # Text overlays sit on top of the quiet's black overlay: for each text
+    # assigned to a quiet range, the text's α curve tracks the black
+    # overlay's α curve, so the text fades in while the picture fades to
+    # black, holds during the black hold, and fades out at restart.
+    text_overlay_windows = []  # [(fi_s, fi_e, fo_s, fo_e, text_frame)]
+    if quiet_overlay_texts and quiet_windows:
+        for text, qi in quiet_overlay_texts:
+            if qi >= len(quiet_windows):
+                continue
+            text_frame = _build_text_slide_frame(
+                text, out_w, out_h,
+                font_path=text_slide_font,
+                backdrop_path=None)
+            text_overlay_windows.append(
+                quiet_windows[qi] + (text_frame,))
+
     if title_label:
         bg_desc = f"image bg ({title_screen_path})" if title_screen_path else "gradient bg"
         ctx.log(f"Title slide: \"{title_label}\" "
@@ -985,10 +1663,19 @@ def run(*, folder, num_images=20, aspect="16:9",
         sub_text = slides_seq[0].get("subtitle", "")
         if sub_text:
             ctx.log(f"Subtitle: \"{sub_text.replace(chr(10), ' / ')}\"")
-    ctx.log(f"Per image: {duration_per_image:.2f}s "
-            f"({frames_per_image} frames), "
-            f"crossfade {crossfade_frames} frames "
-            f"({crossfade_frames/FPS:.2f}s)")
+    if image_durations is not None:
+        dmin = min(image_durations)
+        dmax = max(image_durations)
+        ctx.log(f"Per image: bar-timed, {len(image_durations)} intervals, "
+                f"{dmin:.2f}–{dmax:.2f}s (mean {ref_duration:.2f}s); "
+                f"crossfade {crossfade_frames} frames "
+                f"({crossfade_frames/FPS:.2f}s). "
+                f"Duration-per-image UI value ({duration_per_image:.2f}s) ignored.")
+    else:
+        ctx.log(f"Per image: {duration_per_image:.2f}s "
+                f"({frames_per_image_ref} frames), "
+                f"crossfade {crossfade_frames} frames "
+                f"({crossfade_frames/FPS:.2f}s)")
     if k_text:
         ctx.log(f"Text slides: {k_text} interspersed at image positions "
                 f"{text_positions} of {n}; "
@@ -1011,11 +1698,35 @@ def run(*, folder, num_images=20, aspect="16:9",
             f"rotation up to ±{MAX_ROTATION_DEG * s_clamped:.1f}°)")
     ctx.log(f"Total length: ~{total_seconds:.1f}s")
 
-    audio_track = None
-    if music:
-        audio_track = _resolve_audio_track(music, ctx)
-        if audio_track:
-            ctx.log(f"Audio track: {audio_track}")
+    if audio_track:
+        ctx.log(f"Audio track: {audio_track}")
+        if bar_data is not None:
+            bar_first = bar_data["bar_times"][0]
+            shift = image_onset_s - bar_first
+            if shift >= 0:
+                ctx.log(f"Music aligned to bars: starts at video "
+                        f"t={shift:.3f}s so bar[0] ({bar_first:.3f}s) "
+                        f"lands on the image[0] crossfade midpoint "
+                        f"({image_onset_s:.3f}s).")
+            else:
+                ctx.log(f"Music aligned to bars: trimming "
+                        f"{-shift:.3f}s from audio start so bar[0] "
+                        f"({bar_first:.3f}s) lands on image[0] onset "
+                        f"({image_onset_s:.3f}s).")
+        overlay_bits = []
+        if flash_windows:
+            overlay_bits.append(f"{len(flash_windows)} flash "
+                                f"({FLASH_DURATION_S:.2f}s)")
+        if glow_ramps:
+            overlay_bits.append(f"{len(glow_ramps)} glow (0→1 to next event)")
+        if quiet_windows:
+            overlay_bits.append(f"{len(quiet_windows)} quiet "
+                                f"(fade→black→fade)")
+        if bar_data is not None and bar_data["extend_ranges"]:
+            overlay_bits.append(f"{len(bar_data['extend_ranges'])} extend "
+                                f"(hold picture)")
+        if overlay_bits:
+            ctx.log("Freeze/overlay events: " + ", ".join(overlay_bits) + ".")
 
     cmd = [
         'ffmpeg', '-y',
@@ -1031,17 +1742,38 @@ def run(*, folder, num_images=20, aspect="16:9",
     extra_inputs = []
     filter_complex_parts = []
     audio_label = None
+    music_start_s = 0.0  # video time when the audio track first plays
 
     if audio_track:
         extra_inputs.extend(['-i', audio_track])
         music_chain = ['aresample=44100']
-        # Music starts after any gimmick intro, then half-way through the
-        # opening title slide (if one is set), so it swells under the title.
-        music_start_s = 0.0
-        if gimmick and gimmick_duration > 0:
-            music_start_s += gimmick_duration
-        if title_label:
-            music_start_s += KB_TITLE_DURATION_S / 2
+        # Without bars: music starts after any gimmick intro, then half-way
+        # through the opening title slide (if one is set), so it swells under
+        # the title.
+        # With bars: align music so bar[0] lands at the first image's start.
+        # slides_start_s is the video time when image[0] begins (assuming
+        # crossfades are symmetric enough that the perceptual transition sits
+        # on the boundary). Any pre-image time (gimmick, title) plays music-free
+        # or requires trimming the audio start (via -ss) — see audio_input_ss.
+        audio_input_ss = 0.0
+        if bar_data is not None:
+            # bar[0] should play at image[0]'s perceptual onset (crossfade
+            # midpoint if there's a title, else its literal onset). That
+            # anchor was precomputed above as image_onset_s.
+            music_start_s = image_onset_s - bar_data["bar_times"][0]
+            if music_start_s < 0:
+                audio_input_ss = -music_start_s
+                music_start_s = 0.0
+            # If bar_data was rebased for start_at_crop, skip that much
+            # more of the music input so the trimmed audio starts at the
+            # crop moment (which is now bar_data's t=0).
+            audio_input_ss += bar_data.get("crop_offset_s", 0.0)
+        else:
+            music_start_s = 0.0
+            if gimmick and gimmick_duration > 0:
+                music_start_s += gimmick_duration
+            if title_label:
+                music_start_s += KB_TITLE_DURATION_S / 2
         if music_start_s > 0:
             delay_ms = int(round(music_start_s * 1000))
             music_chain.append(f"adelay={delay_ms}|{delay_ms}")
@@ -1052,6 +1784,10 @@ def run(*, folder, num_images=20, aspect="16:9",
         music_chain.append(
             f"afade=t=out:st={audio_fade_start:.3f}:d={KB_AUDIO_FADE_OUT_S:.3f}"
         )
+        if audio_input_ss > 0:
+            # Trim leading audio so bar[0] plays at video time 0 (used when
+            # there is no title/gimmick and bar[0] > 0).
+            extra_inputs[:0] = ['-ss', f"{audio_input_ss:.3f}"]
         filter_complex_parts.append(f"[1:a]{','.join(music_chain)}[music]")
 
     if gimmick and gimmick_duration > 0 and gimmick_frames_list:
@@ -1100,6 +1836,9 @@ def run(*, folder, num_images=20, aspect="16:9",
     elif has_clicks:
         audio_label = "[clicks]"
 
+    if bar_data is not None:
+        _log_music_video_timeline(ctx, bar_data, bar_segments, music_start_s)
+
     cmd += extra_inputs
     if audio_label is not None:
         cmd += [
@@ -1111,18 +1850,45 @@ def run(*, folder, num_images=20, aspect="16:9",
         ]
     else:
         cmd += ['-an']
-    cmd += [
-        '-vcodec', 'libx264',
-        '-pix_fmt', 'yuv420p',
-        '-preset', 'medium',
-        '-crf', '18',
-        output,
-    ]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-    ctx.register_process(proc)
 
-    def render_local(scene, start_v, end_v, f):
-        t = f / max(1, frames_per_image - 1)
+    # Encoder selection. On macOS we prefer h264_videotoolbox (hardware
+    # H.264), which typically encodes 3-10x faster than libx264 for these
+    # slideshow-style videos. Elsewhere we fall back to libx264 with a
+    # faster preset in debug mode (debug videos are throwaway previews).
+    use_hw = platform.system() == "Darwin"
+    if use_hw:
+        # ~5 Mbps per megapixel gives sensible file sizes across 720p / 1080p /
+        # 4K. Debug mode halves the bitrate for smaller/faster throwaway files.
+        megapixels = (out_w * out_h) / 1_000_000
+        bitrate_mbps = max(4, int(megapixels * (2.5 if debug else 5)))
+        cmd += [
+            '-c:v', 'h264_videotoolbox',
+            '-pix_fmt', 'yuv420p',
+            '-b:v', f'{bitrate_mbps}M',
+            '-profile:v', 'high',
+            '-allow_sw', '1',  # silently fall back if hw unavailable
+            output,
+        ]
+        ctx.log(f"Encoder: h264_videotoolbox (hardware) @ {bitrate_mbps} Mbps"
+                + ("  [debug]" if debug else ""))
+    else:
+        preset = 'ultrafast' if debug else 'medium'
+        cmd += [
+            '-vcodec', 'libx264',
+            '-pix_fmt', 'yuv420p',
+            '-preset', preset,
+            '-crf', '18',
+            output,
+        ]
+        ctx.log(f"Encoder: libx264 (software) preset={preset}")
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    # NOTE: intentionally *not* calling ctx.register_process(proc) so that
+    # ctx.cancel() does NOT terminate ffmpeg. On stop we want to finish the
+    # current slide, close the pipe cleanly, and let ffmpeg finalise a
+    # valid MP4 of what was rendered up to that point.
+
+    def render_local(scene, start_v, end_v, f, fpi):
+        t = f / max(1, fpi - 1)
         te = 3 * t * t - 2 * t * t * t   # smoothstep
         cx = start_v[0] + (end_v[0] - start_v[0]) * te
         cy = start_v[1] + (end_v[1] - start_v[1]) * te
@@ -1130,10 +1896,237 @@ def run(*, folder, num_images=20, aspect="16:9",
         rot = start_v[3] + (end_v[3] - start_v[3]) * te
         return _kb_frame(scene, out_w, out_h, cx, cy, scale, rot)
 
+    slide_frame_index = [0]
+    have_overlays = bool(flash_windows or glow_ramps or quiet_windows
+                         or text_overlay_windows)
+    white_frame_cached = (Image.new("RGB", (out_w, out_h), (255, 255, 255))
+                          if (flash_windows or glow_ramps) else None)
+    black_frame_cached = (Image.new("RGB", (out_w, out_h), (0, 0, 0))
+                          if quiet_windows else None)
+
+    # Debug overlay state: build a compact chronological timeline of every
+    # bar / event / synthetic cut, plus a monospace font. Cached per
+    # current-index so the strip only re-renders when a new event fires.
+    debug_active = debug and bar_data is not None
+    debug_font = None
+    debug_timeline = []  # list of dicts: {time, kind, desc}
+    debug_current_slide = [None]  # (index, kind, label) — mutated in slide loop
+    debug_strip_state = None
+
+    if debug_active:
+        for path in ("/System/Library/Fonts/Menlo.ttc",
+                     "/System/Library/Fonts/Courier.ttc",
+                     "/Library/Fonts/Courier New.ttf"):
+            try:
+                debug_font = ImageFont.truetype(path, 16)
+                break
+            except (OSError, IOError):
+                continue
+        if debug_font is None:
+            debug_font = ImageFont.load_default()
+
+        half_xfade = CROSSFADE_S / 2.0
+        freezes = []
+        for s, e in bar_data["quiet_ranges"]:
+            freezes.append((s, e, "quiet"))
+        for s, e in bar_data["extend_ranges"]:
+            freezes.append((s, e, "extend"))
+        for s, e in bar_data["glow_ranges"]:
+            freezes.append((s, e, "glow"))
+
+        def _in_freeze(t):
+            for s, e, kind in freezes:
+                if s <= t < e:
+                    return kind
+            return None
+
+        seg_start_by_time = {round(seg["start"], 6): i
+                             for i, seg in enumerate(bar_segments)}
+
+        def _pick_name(img_i):
+            if 0 <= img_i < len(picks):
+                return picks[img_i].name
+            return "?"
+
+        for t in bar_data["bar_times"]:
+            key = round(t, 6)
+            if key in seg_start_by_time:
+                img_i = seg_start_by_time[key]
+                d = f"→ img#{img_i} {_pick_name(img_i)}"
+                debug_timeline.append({"time": t, "kind": "bar",
+                                       "desc": d, "order": 2})
+            else:
+                fk = _in_freeze(t)
+                debug_timeline.append({
+                    "time": t, "kind": "bar",
+                    "desc": f"[skip: {fk}]" if fk else "[skip: merged]",
+                    "order": 2})
+        for t in bar_data.get("muted_bar_times", []):
+            debug_timeline.append({"time": t, "kind": "muted",
+                                   "desc": "(muted)", "order": 2})
+        event_desc = {
+            "quieting": "fade→black start",
+            "restart":  "quiet ended, image visible",
+            "extend":   "hold picture",
+            "glow":     "→ white ramp start",
+            "flash":    f"white {FLASH_DURATION_S:.2f}s",
+            "crop":     "(crop rebase)",
+        }
+        for e in bar_data["events"]:
+            debug_timeline.append({
+                "time": e["time"], "kind": e["kind"],
+                "desc": event_desc.get(e["kind"], e["kind"]),
+                "order": 1})
+        for s, e in bar_data["quiet_ranges"]:
+            L = e - s
+            if L < CROSSFADE_S:
+                continue
+            hold_end = e - QUIET_RESTART_FADE_S
+            cut = max(s + half_xfade, hold_end - half_xfade)
+            key = round(cut, 6)
+            img_i = seg_start_by_time.get(key)
+            d = (f"→ img#{img_i} {_pick_name(img_i)} (under black)"
+                 if img_i is not None else "→ (merged forward)")
+            debug_timeline.append({"time": cut, "kind": "cut",
+                                   "desc": d, "order": 3})
+        debug_timeline.sort(key=lambda x: (x["time"], x["order"]))
+
+        strip_w = min(500, out_w // 2)
+        line_h = 22
+        hud_pad = 6
+        hud_line_h = 22
+        hud_line_count = 3
+        hud_h = hud_pad * 2 + hud_line_h * hud_line_count
+        strip_body_top = hud_h
+        strip_body_h = max(line_h, out_h - hud_h)
+        n_visible = max(4, strip_body_h // line_h)
+        current_row = (n_visible * 2) // 3
+        debug_strip_state = {
+            "width": strip_w,
+            "line_h": line_h,
+            "hud_h": hud_h,
+            "hud_pad": hud_pad,
+            "hud_line_h": hud_line_h,
+            "strip_body_top": strip_body_top,
+            "strip_body_h": strip_body_h,
+            "n_visible": n_visible,
+            "current_row": current_row,
+            "cached_idx": [-2],
+            "cached_body": [None],
+        }
+
+    def _render_debug_strip_body(current_idx):
+        """Render just the scrolling-timeline portion (below the HUD).
+        Cached per current_idx — only re-renders when a new event fires."""
+        st = debug_strip_state
+        if (st["cached_idx"][0] == current_idx
+                and st["cached_body"][0] is not None):
+            return st["cached_body"][0]
+        body = Image.new("RGB", (st["width"], st["strip_body_h"]),
+                         (0, 0, 0))
+        draw = ImageDraw.Draw(body)
+        start_row = current_idx - st["current_row"]
+        for row in range(st["n_visible"]):
+            entry_idx = start_row + row
+            if entry_idx < 0 or entry_idx >= len(debug_timeline):
+                continue
+            e = debug_timeline[entry_idx]
+            y = row * st["line_h"]
+            is_current = (entry_idx == current_idx)
+            if is_current:
+                draw.rectangle([(0, y),
+                                (st["width"], y + st["line_h"])],
+                               fill=(35, 55, 90))
+            color = ((255, 255, 255) if is_current
+                     else (170, 170, 170) if entry_idx < current_idx
+                     else (110, 130, 160))
+            marker = "▶" if is_current else " "
+            line = (f"{marker} {e['time']:7.3f} {e['kind']:>8s}  "
+                    f"{e['desc']}")[:60]
+            draw.text((4, y + 2), line, fill=color, font=debug_font)
+        st["cached_idx"][0] = current_idx
+        st["cached_body"][0] = body
+        return body
+
+    def _debug_overlay(frame, music_t, video_t, wa, ba, ta):
+        """Paint the debug HUD (top) + scrolling timeline (below) as a
+        full-height opaque strip on the left of the frame."""
+        st = debug_strip_state
+        current_idx = -1
+        for i, e in enumerate(debug_timeline):
+            if e["time"] <= music_t:
+                current_idx = i
+            else:
+                break
+        body = _render_debug_strip_body(current_idx)
+        frame.paste(body, (0, st["strip_body_top"]))
+        draw = ImageDraw.Draw(frame)
+        cur = debug_current_slide[0]
+        slide_line = (f"[{cur[0]}] {cur[1]}: {cur[2]}"[:60]
+                      if cur is not None else "slide: -")
+        hud_lines = [
+            f"music={music_t:7.3f}s  video={video_t:7.3f}s",
+            slide_line,
+            f"α w={wa:.2f} b={ba:.2f} t={ta:.2f}",
+        ]
+        draw.rectangle([(0, 0), (st["width"], st["hud_h"])],
+                       fill=(0, 0, 0))
+        for i, ln in enumerate(hud_lines):
+            draw.text((st["hud_pad"],
+                       st["hud_pad"] + i * st["hud_line_h"]),
+                      ln, fill=(255, 220, 120), font=debug_font)
+        return frame
+
+    def _text_overlay_at(t):
+        """Return (text_frame, alpha) for text overlay active at video time
+        `t`, or (None, 0.0). α follows the same shape as the black overlay
+        of the associated quiet range."""
+        for fi_s, fi_e, fo_s, fo_e, text_frame in text_overlay_windows:
+            if fi_s <= t <= fo_e:
+                if t <= fi_e:
+                    span = fi_e - fi_s
+                    a = (t - fi_s) / span if span > 1e-9 else 1.0
+                elif t <= fo_s:
+                    a = 1.0
+                else:
+                    span = fo_e - fo_s
+                    a = 1.0 - (t - fo_s) / span if span > 1e-9 else 0.0
+                if a < 0.0:
+                    a = 0.0
+                elif a > 1.0:
+                    a = 1.0
+                return text_frame, a
+        return None, 0.0
+
     def main_write(frame):
         """Write a single RGB frame to ffmpeg and return it (so callers can
-        capture it, e.g. for `last_main_frame`)."""
+        capture it, e.g. for `last_main_frame`). Applies white (flash/glow),
+        black (quiet), text overlays, and optionally a debug HUD on top
+        when their windows cover this frame's video time."""
+        t_v = gimmick_duration + slide_frame_index[0] / FPS
+        wa = ba = ta = 0.0
+        if have_overlays:
+            fa, ga, ba = _overlay_at(
+                t_v, flash_windows, glow_ramps, quiet_windows)
+            wa = max(fa, ga)  # combined white level, for the debug HUD
+            if fa > 0.0:
+                # Flash = the current image, blown bright — not pure white.
+                brightened = ImageEnhance.Brightness(frame).enhance(
+                    FLASH_BRIGHTNESS_FACTOR)
+                frame = Image.blend(frame, brightened, fa)
+            if ga > 0.0 and white_frame_cached is not None:
+                frame = Image.blend(frame, white_frame_cached, ga)
+            if ba > 0.0 and black_frame_cached is not None:
+                frame = Image.blend(frame, black_frame_cached, ba)
+            if text_overlay_windows:
+                text_frame, ta = _text_overlay_at(t_v)
+                if ta > 0.0 and text_frame is not None:
+                    frame = Image.blend(frame, text_frame, ta)
+        if debug_active:
+            music_t = t_v - music_start_s
+            frame = _debug_overlay(frame, music_t, t_v, wa, ba, ta)
         proc.stdin.write(frame.tobytes())
+        slide_frame_index[0] += 1
         return frame
 
     prev_tail = None  # list of PIL.Image with previous image's last K frames
@@ -1150,22 +2143,79 @@ def run(*, folder, num_images=20, aspect="16:9",
                 for _ in range(gimmick_frames_list[i]):
                     proc.stdin.write(fb)
 
+        def _song_time_prefix():
+            """Elapsed time in the song at the start of the current slide,
+            formatted as mm:ss.ff. Reads slide_frame_index[0] which is the
+            next-to-be-written frame index into the slides portion of the
+            pipe, so it's the position at which this slide begins."""
+            v = gimmick_duration + slide_frame_index[0] / FPS
+            song_s = v - music_start_s
+            if song_s < 0:
+                return "  --:--.--"
+            m = int(song_s // 60)
+            r = song_s - m * 60
+            return f"{m:>3d}:{r:05.2f}"
+
         for i, slide in enumerate(slides_seq):
             if ctx.cancelled():
+                # User asked to stop. Finish the previous slide's saved
+                # tail as solo frames so it ends cleanly (as if it had
+                # been the last slide), then stop rendering.
+                if prev_tail is not None:
+                    for frame in prev_tail:
+                        try:
+                            written = main_write(frame)
+                            last_main_frame = written
+                        except BrokenPipeError:
+                            break
+                    prev_tail = None
                 break
-            fpi_local = _slide_frames(slide)
+            fpi_local = per_slide_frames[i]
+            song_prefix = _song_time_prefix()
+            hard_cut_in = False  # incoming transition is a hard cut, not a fade
             if slide["kind"] == "image":
-                ctx.log(f"  [{i + 1}/{total_slides}] {slide['path'].name}")
-                scene, scene_w, scene_h = _prepare_scene(
-                    slide["path"], out_w, out_h)
-                start_v, end_v = _random_kb_views(
-                    out_w, out_h, scene_w, scene_h, kb_strength)
+                dur_s = slide.get("duration_s")
+                is_short = dur_s is not None and dur_s < SHORT_SLIDE_MAX_S
+                short_tag = "  [hard cut, static]" if is_short else ""
+                ctx.log(f"{song_prefix}  [{i + 1}/{total_slides}] "
+                        f"{slide['path'].name} ({fpi_local/FPS:.2f}s)"
+                        f"{short_tag}")
+                debug_current_slide[0] = (i, "image", slide["path"].name)
+                if debug:
+                    # Debug mode: skip Ken Burns motion + blurred scene
+                    # prep. A static gimmick-style fit is ~10x faster per
+                    # frame and lets the debug HUD/timeline stay fluid.
+                    # Copy per-call so the shared static isn't mutated by
+                    # the debug HUD's in-place drawing.
+                    static_img = _gimmick_frame(slide["path"], out_w, out_h)
 
-                def frame_at(k, _s=scene, _sv=start_v, _ev=end_v):
-                    return render_local(_s, _sv, _ev, k)
+                    def frame_at(k, _f=static_img):
+                        return _f.copy()
+                elif is_short:
+                    # Too brief for motion to read: freeze the scene at the
+                    # centered, unzoomed view (same blurred-bg composition as
+                    # the moving slides, just no pan/zoom) and hard-cut in.
+                    scene, scene_w, scene_h = _prepare_scene(
+                        slide["path"], out_w, out_h)
+                    static_img = _kb_frame(scene, out_w, out_h,
+                                           scene_w / 2, scene_h / 2, 1.0, 0.0)
+                    hard_cut_in = True
+
+                    def frame_at(k, _f=static_img):
+                        return _f
+                else:
+                    scene, scene_w, scene_h = _prepare_scene(
+                        slide["path"], out_w, out_h)
+                    start_v, end_v = _random_kb_views(
+                        out_w, out_h, scene_w, scene_h, kb_strength)
+
+                    def frame_at(k, _s=scene, _sv=start_v, _ev=end_v,
+                                 _fpi=fpi_local):
+                        return render_local(_s, _sv, _ev, k, _fpi)
             elif slide["kind"] == "title":
-                ctx.log(f"  [{i + 1}/{total_slides}] [title] {slide['label']} "
-                        f"({fpi_local/FPS:.1f}s)")
+                ctx.log(f"{song_prefix}  [{i + 1}/{total_slides}] "
+                        f"[title] {slide['label']} ({fpi_local/FPS:.1f}s)")
+                debug_current_slide[0] = (i, "title", slide.get("label", ""))
                 title_static_frame = slide["frame"]
 
                 def frame_at(k, _f=title_static_frame):
@@ -1178,9 +2228,11 @@ def run(*, folder, num_images=20, aspect="16:9",
                     if prev["kind"] == "image":
                         backdrop_path = prev["path"]
                         break
-                ctx.log(f"  [{i + 1}/{total_slides}] [text] {slide['text']} "
+                ctx.log(f"{song_prefix}  [{i + 1}/{total_slides}] "
+                        f"[text] {slide['text']} "
                         f"({wc} word{'s' if wc != 1 else ''}, "
                         f"{fpi_local/FPS:.1f}s)")
+                debug_current_slide[0] = (i, "text", slide["text"][:40])
                 static_text_frame = _build_text_slide_frame(
                     slide["text"], out_w, out_h,
                     font_path=text_slide_font,
@@ -1189,28 +2241,36 @@ def run(*, folder, num_images=20, aspect="16:9",
                 def frame_at(k, _f=static_text_frame):
                     return _f
 
-            # First K frames: crossfade with prev tail, else write solo
+            # Once we've started a slide we always render it to the end —
+            # a cancel is only honoured at the slide-loop boundary above.
+            # This gives the user a "stop after this slide" semantic and
+            # avoids truncating the video mid-frame.
             if crossfade_frames > 0:
                 for k in range(crossfade_frames):
-                    if ctx.cancelled():
-                        break
                     new_frame = frame_at(k)
                     if prev_tail is not None:
-                        alpha = (k + 1) / (crossfade_frames + 1)
-                        out_frame = Image.blend(prev_tail[k], new_frame, alpha)
+                        if hard_cut_in:
+                            # No blend: show the old picture until the point
+                            # where a fade would have crossed 50% (which is
+                            # the bar-aligned moment), then snap to the new
+                            # one. Keeps the change on the same frame a fade
+                            # would land on.
+                            past_mid = (k + 1) / (crossfade_frames + 1) >= 0.5
+                            out_frame = new_frame if past_mid else prev_tail[k]
+                        else:
+                            alpha = (k + 1) / (crossfade_frames + 1)
+                            out_frame = Image.blend(
+                                prev_tail[k], new_frame, alpha)
                     else:
                         out_frame = new_frame
                     written = main_write(out_frame)
                     if i == total_slides - 1:
                         last_main_frame = written
 
-            # Middle frames: solo
             mid_start = crossfade_frames
             mid_end = fpi_local - (
                 crossfade_frames if i < total_slides - 1 else 0)
             for k in range(mid_start, mid_end):
-                if ctx.cancelled():
-                    break
                 frame = frame_at(k)
                 written = main_write(frame)
                 if i == total_slides - 1:
@@ -1249,11 +2309,11 @@ def run(*, folder, num_images=20, aspect="16:9",
             pass
         proc.wait()
 
-    if ctx.cancelled():
-        ctx.log("Cancelled.")
-        return None
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg exited with code {proc.returncode}")
 
-    ctx.log(f"Video saved to {output}")
+    if ctx.cancelled():
+        ctx.log(f"Stopped by user — partial video saved to {output}")
+    else:
+        ctx.log(f"Video saved to {output}")
     return output
