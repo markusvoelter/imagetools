@@ -50,34 +50,15 @@ def add_swipe_indicator(slide):
     return slide
 
 
-def run(*, folder, num_slides=20, aspect_ratio="9:16",
-        output_dir=None, ctx=None):
-    """Build the carousel.
-
-    folder        absolute path with source images
-    num_slides    target slide count (may be reduced if not enough source)
-    aspect_ratio  key into ASPECT_RATIOS
-    output_dir    absolute output dir; defaults to sibling of `folder` named
-                  "<folder>-swipey"
-    ctx           RunContext
-    """
-    if ctx is None:
-        ctx = RunContext()
-
-    folder = os.path.abspath(folder)
-    if not os.path.isdir(folder):
-        raise ValueError(f"Not a directory: {folder}")
-
-    if output_dir is None:
-        parent = os.path.dirname(folder)
-        output_dir = os.path.join(parent, os.path.basename(folder) + "-swipey")
-    else:
-        output_dir = os.path.abspath(output_dir)
+def _build_one_set(folder, num_slides, aspect_ratio, output_dir,
+                   random_order, ctx):
+    """Build a single carousel into `output_dir`. Returns `output_dir`."""
     os.makedirs(output_dir, exist_ok=True)
     ctx.log(f"Output folder: {output_dir}")
 
     strip, num_slides, section_width, working_height, out_width, out_height = (
-        build_panorama_strip(folder, num_slides, aspect_ratio, ctx)
+        build_panorama_strip(folder, num_slides, aspect_ratio, ctx,
+                             random_order=random_order)
     )
 
     for i in range(num_slides):
@@ -108,5 +89,56 @@ def run(*, folder, num_slides=20, aspect_ratio="9:16",
         slide.save(out_path, quality=95, exif=exif_bytes)
         ctx.log(f"  Saved {out_path}  ({time_str})")
 
-    ctx.log("Done!")
     return output_dir
+
+
+def run(*, folder, num_slides=20, aspect_ratio="9:16",
+        output_dir=None, random_order=False, num_sets=1, ctx=None):
+    """Build the carousel.
+
+    folder        absolute path with source images
+    num_slides    target slide count (may be reduced if not enough source)
+    aspect_ratio  key into ASPECT_RATIOS
+    output_dir    absolute output dir; defaults to sibling of `folder` named
+                  "<folder>-swipey"
+    random_order  if True, pick source images in random order instead of
+                  natural-sorted by filename
+    num_sets      how many result sets to produce. When > 1, each set goes into
+                  its own subfolder ("set_01", "set_02", ...) under the image
+                  folder (or under `output_dir` if given); combine with
+                  `random_order` to get a different shuffle per set.
+    ctx           RunContext
+    """
+    if ctx is None:
+        ctx = RunContext()
+
+    folder = os.path.abspath(folder)
+    if not os.path.isdir(folder):
+        raise ValueError(f"Not a directory: {folder}")
+
+    if num_sets is None or num_sets < 1:
+        num_sets = 1
+
+    if num_sets == 1:
+        if output_dir is None:
+            parent = os.path.dirname(folder)
+            output_dir = os.path.join(parent, os.path.basename(folder) + "-swipey")
+        else:
+            output_dir = os.path.abspath(output_dir)
+        result = _build_one_set(folder, num_slides, aspect_ratio, output_dir,
+                                random_order, ctx)
+        ctx.log("Done!")
+        return result
+
+    parent = os.path.abspath(output_dir) if output_dir else folder
+    if not random_order:
+        ctx.log("Note: 'Random order' is off, so all sets will be identical.")
+    for s in range(num_sets):
+        ctx.check_cancelled()
+        set_dir = os.path.join(parent, f"set_{s + 1:02d}")
+        ctx.log(f"=== Set {s + 1}/{num_sets} -> {set_dir} ===")
+        _build_one_set(folder, num_slides, aspect_ratio, set_dir,
+                       random_order, ctx)
+
+    ctx.log("Done!")
+    return parent

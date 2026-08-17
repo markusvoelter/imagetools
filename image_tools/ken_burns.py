@@ -18,7 +18,8 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
+from PIL import (Image, ImageColor, ImageDraw, ImageEnhance, ImageFilter,
+                 ImageFont)
 
 from . import RunContext
 
@@ -35,10 +36,18 @@ SHORT_SLIDE_MAX_S = 0.7  # bar-timed images on screen shorter than this render
 FLASH_DURATION_S = 0.025       # per-flash-event overlay hold time
 FLASH_BRIGHTNESS_FACTOR = 3.0  # a flash brightens the current image by this
 # factor (blown-out highlights, shadow detail kept) instead of going pure white
-QUIET_FADE_IN_FRACTION = 0.375  # fade-IN duration as fraction of quiet length; span is [T_q, T_q+dur]
+GLOW_COLOR_WHITE_MIX = 0.9     # glow peak = this much white blended into the
+# image's average color (0 = plain average color, 1.0 = pure white)
+QUIET_FADE_IN_FRACTION = 0.8    # fade-IN duration as fraction of quiet length; span is [T_q, T_q+dur]. The remaining ~20% holds constant black (bar the fixed restart fade).
 QUIET_RESTART_FADE_S = 0.15    # fixed short fade-OUT ending exactly at T_r
-BLACK_FADE_IN_EXP = 5.0        # curvature of the fade-TO-black; >0 darkens
-# faster at the start of the fade (blacker sooner), 0 = linear.
+STOP_FADE_IN_BAR_FRACTION = 0.25  # "stop" blackout fades in over this fraction
+# of the local bar interval (much quicker than a "quiet"), then holds black.
+BLEAK_FADE_IN_S = 0.75         # "bleak" grade fades in over this many seconds
+BLEAK_MAX_CONTRAST = 12.0      # ImageEnhance.Contrast factor at contrast=+10
+# (approximates a pure black/white threshold; contrast=0 → factor 1 = normal)
+BLACK_FADE_IN_EXP = 0.0        # curvature of the fade-TO-black; >0 darkens
+# faster at the start of the fade (blacker sooner), 0 = linear (even darkening
+# spread across the whole fade span).
 DEFAULT_KB_STRENGTH = 0.5     # 0..1
 MAX_ZOOM_AT_FULL_STRENGTH = 0.5  # strength=1.0 → up to 1.5x zoom
 MAX_ROTATION_DEG = 7.5        # strength=1.0 → rotations sampled in ±MAX_ROTATION_DEG
@@ -118,13 +127,67 @@ ASPECTS = {
 }
 
 
+def _parse_bleak_params(raw):
+    """Normalise a bleak event's `params` into a clamped grade dict.
+
+    Keys: brightness/-10..+10, contrast/-10..+10, color_rgb/(r,g,b),
+    transparency/0..100. Missing or invalid values fall back to a no-op
+    grade (brightness 0, contrast 0, fully-transparent overlay)."""
+    raw = raw or {}
+
+    def _num(key, lo, hi, default):
+        try:
+            return max(lo, min(hi, float(raw[key])))
+        except (KeyError, TypeError, ValueError):
+            return default
+
+    try:
+        color_rgb = ImageColor.getrgb(str(raw.get("color", "#000000")))[:3]
+    except (ValueError, TypeError):
+        color_rgb = (0, 0, 0)
+
+    return {
+        "brightness": _num("brightness", -10.0, 10.0, 0.0),
+        "contrast": _num("contrast", -10.0, 10.0, 0.0),
+        "color_rgb": color_rgb,
+        "transparency": _num("transparency", 0.0, 100.0, 100.0),
+    }
+
+
+def _apply_bleak(frame, alpha, params):
+    """Apply a bleak grade to `frame` at strength `alpha` (0 = untouched,
+    1 = full grade). brightness/contrast/overlay each interpolate from
+    identity at alpha=0 to their full param value at alpha=1."""
+    # Brightness: -10 → black, +10 → white, 0 → unchanged.
+    b = params["brightness"] * alpha
+    if b < 0:
+        frame = ImageEnhance.Brightness(frame).enhance(1.0 + b / 10.0)
+    elif b > 0:
+        white = Image.new("RGB", frame.size, (255, 255, 255))
+        frame = Image.blend(frame, white, b / 10.0)
+
+    # Contrast: -10 → flat (one colour), 0 → normal, +10 → near black/white.
+    c = params["contrast"] * alpha
+    if c < 0:
+        frame = ImageEnhance.Contrast(frame).enhance(1.0 + c / 10.0)
+    elif c > 0:
+        factor = 1.0 + (c / 10.0) * (BLEAK_MAX_CONTRAST - 1.0)
+        frame = ImageEnhance.Contrast(frame).enhance(factor)
+
+    # Colour overlay: transparency 0 → solid colour, 100 → invisible.
+    overlay_alpha = (1.0 - params["transparency"] / 100.0) * alpha
+    if overlay_alpha > 0:
+        color = Image.new("RGB", frame.size, params["color_rgb"])
+        frame = Image.blend(frame, color, overlay_alpha)
+    return frame
+
+
 def _load_bar_data(audio_path, start_at_crop=False):
     """Load bar timing and event structure from a sidecar JSON, or None.
 
     Returns a dict with:
       bar_times:     sorted list of bar timestamps (music seconds).
       quiet_ranges:  [(T_q, T_r)] pairs — quieting → restart.
-      extend_ranges: [(T_s, T_e)] pairs — extend → next event (any kind).
       glow_ranges:   [(T_s, T_e)] pairs — glow → next event (any kind).
       flash_times:   [T] — each flash lasts FLASH_DURATION_S from T.
       events:        raw sorted list of {"time", "kind"}.
@@ -133,8 +196,8 @@ def _load_bar_data(audio_path, start_at_crop=False):
     If `start_at_crop=True` and the JSON has a "crop" event, all bar times
     and event times are rebased so the crop moment becomes t=0; anything
     before that is dropped, and the audio input will be seeked forward by
-    the same offset (see caller). The extend/glow "next event" falls back
-    to bar_times[-1] if no later event exists. Any parse failure returns
+    the same offset (see caller). The glow "next event" falls back to
+    bar_times[-1] if no later event exists. Any parse failure returns
     None.
     """
     if not audio_path:
@@ -176,7 +239,7 @@ def _load_bar_data(audio_path, start_at_crop=False):
         kind = str(e.get("kind", "")).strip()
         if not kind:
             continue
-        events.append({"time": t, "kind": kind})
+        events.append({"time": t, "kind": kind, "params": e.get("params")})
     events.sort(key=lambda e: e["time"])
 
     crop_offset_s = 0.0
@@ -193,48 +256,69 @@ def _load_bar_data(audio_path, start_at_crop=False):
                            if t >= crop_offset_s]
             manual_times = [t - crop_offset_s for t in manual_times
                             if t >= crop_offset_s]
-            events = [{"time": e["time"] - crop_offset_s, "kind": e["kind"]}
+            events = [{"time": e["time"] - crop_offset_s, "kind": e["kind"],
+                       "params": e.get("params")}
                       for e in events
                       if e["time"] >= crop_offset_s and e["kind"] != "crop"]
 
     bar_times = sorted(times)
     muted_bar_times = sorted(muted_times)
-    all_event_ts = [e["time"] for e in events]
 
     def _times_of(kind):
         return [e["time"] for e in events if e["kind"] == kind]
 
-    quieting_ts = _times_of("quieting")
     restart_ts = _times_of("restart")
-    quiet_ranges = []
-    r_idx = 0
-    for q in quieting_ts:
-        while r_idx < len(restart_ts) and restart_ts[r_idx] <= q:
-            r_idx += 1
-        if r_idx >= len(restart_ts):
-            break
-        quiet_ranges.append((q, restart_ts[r_idx]))
-        r_idx += 1
-
     fallback_end = bar_times[-1]
 
-    def _next_after(t):
-        for et in all_event_ts:
-            if et > t:
-                return et
-        return fallback_end
+    def _first_after(sorted_ts, t):
+        for x in sorted_ts:
+            if x > t:
+                return x
+        return None
 
-    extend_ranges = [(t, _next_after(t)) for t in _times_of("extend")]
-    glow_ranges = [(t, _next_after(t)) for t in _times_of("glow")]
+    # Event taxonomy:
+    #   - Point events (e.g. flash) sit at a single instant and never
+    #     terminate a range.
+    #   - Range events (glow, quiet, stop) span a period and CANNOT nest:
+    #     each ends when the next range event starts or a restart occurs
+    #     (whichever is first), falling back to the last bar.
+    #   - restart is a pure terminator; bleak is an independent grade (below).
+    RANGE_KINDS = ("glow", "quieting", "stop")
+    range_start_ts = sorted(e["time"] for e in events
+                            if e["kind"] in RANGE_KINDS)
+
+    def _range_end(t):
+        nxt_range = _first_after(range_start_ts, t)
+        nxt_restart = _first_after(restart_ts, t)
+        ends = [x for x in (nxt_range, nxt_restart) if x is not None]
+        return min(ends) if ends else fallback_end
+
+    quiet_ranges = [(t, _range_end(t)) for t in _times_of("quieting")]
+    stop_ranges = [(t, _range_end(t)) for t in _times_of("stop")]
+    glow_ranges = [(t, _range_end(t)) for t in _times_of("glow")]
     flash_times = _times_of("flash")
 
+    # "bleak" is an independent colour grade (pictures keep changing), not a
+    # freeze/blackout range event, so it spans from its start to the next
+    # restart regardless of any range events inside it. Each bleak carries a
+    # grade (brightness/contrast/colour overlay) via its params.
+    def _next_restart_after(t):
+        r = _first_after(restart_ts, t)
+        return r if r is not None else fallback_end
+
+    bleak_ranges = [(e["time"], _next_restart_after(e["time"]),
+                     _parse_bleak_params(e.get("params")))
+                    for e in events if e["kind"] == "bleak"]
+
     return {
+        "json_path": os.path.abspath(json_path),
         "bar_times": bar_times,
         "muted_bar_times": muted_bar_times,
         "muted_bar_count": len(muted_bar_times),
         "manual_bar_times": sorted(manual_times),
         "quiet_ranges": quiet_ranges,
-        "extend_ranges": extend_ranges,
+        "stop_ranges": stop_ranges,
+        "bleak_ranges": bleak_ranges,
         "glow_ranges": glow_ranges,
         "flash_times": flash_times,
         "events": events,
@@ -268,15 +352,26 @@ def _compute_overlay_windows(bar_data, image_onset_s, bar_first_s,
     def m2v(t):
         return image_onset_s + (t - bar_first_s)
 
-    # Per-quiet fade-in duration, clamped so it never encroaches on the
-    # fade-out span (matters only for very short quiet events).
+    # Per-blackout fade-in duration, keyed by start time and clamped so it
+    # never encroaches on the fade-out span. "quiet" scales to its own length;
+    # "stop" fades in quickly over a fraction of the local bar interval.
     quiet_fade_in_dur = {}
     for s, e in bar_data["quiet_ranges"]:
         L = e - s
         max_fade_in = max(0.0, L - quiet_restart_fade_s)
         quiet_fade_in_dur[s] = min(quiet_fade_in_fraction * L, max_fade_in)
+    for s, e in bar_data.get("stop_ranges", []):
+        L = e - s
+        max_fade_in = max(0.0, L - quiet_restart_fade_s)
+        interval = _local_bar_interval(s, bar_data["bar_times"])
+        quiet_fade_in_dur[s] = min(
+            STOP_FADE_IN_BAR_FRACTION * interval, max_fade_in)
 
-    flash_windows = [(m2v(t), m2v(t + flash_duration_s))
+    # Floor the flash width at one frame: a window narrower than a frame
+    # period can fall entirely between two sampled frames and never render,
+    # making the flash randomly invisible.
+    flash_w = max(flash_duration_s, 1.0 / FPS)
+    flash_windows = [(m2v(t), m2v(t) + flash_w)
                      for t in bar_data["flash_times"]]
 
     glow_ramps = []
@@ -294,14 +389,50 @@ def _compute_overlay_windows(bar_data, image_onset_s, bar_first_s,
                       else ramp_end_v)
         glow_ramps.append((m2v(s), ramp_end_v, hold_end_v))
 
+    # Adjacent blackout ranges (a quiet/stop ending exactly where the next
+    # begins) form one continuous black period. Suppress the fade-out into,
+    # and the fade-in out of, that internal boundary so the picture doesn't
+    # briefly reappear between them.
+    blackout_ranges = (list(bar_data["quiet_ranges"])
+                       + list(bar_data.get("stop_ranges", [])))
+    b_starts = {s for s, _ in blackout_ranges}
+    b_ends = {e for _, e in blackout_ranges}
     quiet_windows = []
-    for s, e in bar_data["quiet_ranges"]:
+    for s, e in blackout_ranges:
         dur = quiet_fade_in_dur[s]
-        quiet_windows.append((
-            m2v(s), m2v(s + dur),                       # fade-in
+        # preceded by another blackout → start already black (no fade-in);
+        # followed by another blackout → stay black (no fade-out).
+        fi_e = m2v(s) if s in b_ends else m2v(s + dur)
+        fo_s = m2v(e) if e in b_starts else m2v(e - quiet_restart_fade_s)
+        quiet_windows.append((m2v(s), fi_e, fo_s, m2v(e)))
+
+    # "bleak" windows share the fade-in/hold/fade-out shape of quiet windows
+    # but drive a colour grade rather than a black overlay. The grade fades
+    # in over BLEAK_FADE_IN_S and lifts over the restart fade back to normal.
+    bleak_windows = []
+    for s, e, params in bar_data.get("bleak_ranges", []):
+        L = e - s
+        fade_in = min(BLEAK_FADE_IN_S, max(0.0, L - quiet_restart_fade_s))
+        bleak_windows.append((
+            m2v(s), m2v(s + fade_in),                   # fade-in
             m2v(e - quiet_restart_fade_s), m2v(e),      # fade-out
+            params,
         ))
-    return flash_windows, glow_ramps, quiet_windows
+    return flash_windows, glow_ramps, quiet_windows, bleak_windows
+
+
+def _local_bar_interval(t, bar_times):
+    """Spacing (music seconds) between the two bars bracketing time `t`.
+    Falls back to the median bar spacing when `t` is outside the bar range."""
+    diffs = [bar_times[i + 1] - bar_times[i]
+             for i in range(len(bar_times) - 1)]
+    if not diffs:
+        return 0.0
+    for i, d in enumerate(diffs):
+        if bar_times[i] <= t < bar_times[i + 1]:
+            return d
+    diffs.sort()
+    return diffs[len(diffs) // 2]
 
 
 def _ease_black_in(p, k=BLACK_FADE_IN_EXP):
@@ -313,12 +444,14 @@ def _ease_black_in(p, k=BLACK_FADE_IN_EXP):
     return (1.0 - math.exp(-k * p)) / (1.0 - math.exp(-k))
 
 
-def _overlay_at(t, flash_windows, glow_ramps, quiet_windows):
-    """Return (flash_alpha, glow_alpha, black_alpha) at video time `t`.
+def _overlay_at(t, flash_windows, glow_ramps, quiet_windows, bleak_windows):
+    """Return (flash_alpha, glow_alpha, black_alpha, bleak_alpha,
+    bleak_params) at video time `t`.
 
     flash_alpha drives a brightened-image pop; glow_alpha drives the white
-    glow ramp; black_alpha drives the fade-to-black. They're returned
-    separately because a flash and a glow render differently."""
+    glow ramp; black_alpha drives the fade-to-black; bleak_alpha + bleak_params
+    drive the bleak colour grade. They're returned separately because they
+    render differently."""
     flash_alpha = 0.0
     for s, e in flash_windows:
         if s <= t <= e:
@@ -352,7 +485,25 @@ def _overlay_at(t, flash_windows, glow_ramps, quiet_windows):
         black_alpha = 0.0
     elif black_alpha > 1.0:
         black_alpha = 1.0
-    return flash_alpha, glow_alpha, black_alpha
+    bleak_alpha = 0.0
+    bleak_params = None
+    for fi_s, fi_e, fo_s, fo_e, params in bleak_windows:
+        if fi_s <= t <= fo_e:
+            if t <= fi_e:
+                span = fi_e - fi_s
+                bleak_alpha = (t - fi_s) / span if span > 1e-9 else 1.0
+            elif t <= fo_s:
+                bleak_alpha = 1.0
+            else:
+                span = fo_e - fo_s
+                bleak_alpha = 1.0 - (t - fo_s) / span if span > 1e-9 else 0.0
+            bleak_params = params
+            break
+    if bleak_alpha < 0.0:
+        bleak_alpha = 0.0
+    elif bleak_alpha > 1.0:
+        bleak_alpha = 1.0
+    return flash_alpha, glow_alpha, black_alpha, bleak_alpha, bleak_params
 
 
 def _merge_tiny_image_segments(segments, min_duration_s):
@@ -432,9 +583,12 @@ def _log_music_video_timeline(ctx, bar_data, bar_segments, music_start_s):
 
     Times shown are music-time (rebased if start_at_crop was used) →
     video-time. Video time is computed as `music_start_s + t`.
+
+    Returns the list of formatted lines (including the header) so the caller
+    can also persist them, e.g. to timeline.txt.
     """
     if not bar_data or not bar_segments:
-        return
+        return []
 
     half_crossfade = CROSSFADE_S / 2.0
 
@@ -442,8 +596,8 @@ def _log_music_video_timeline(ctx, bar_data, bar_segments, music_start_s):
     freezes = []
     for s, e in bar_data["quiet_ranges"]:
         freezes.append((s, e, "quiet"))
-    for s, e in bar_data["extend_ranges"]:
-        freezes.append((s, e, "extend"))
+    for s, e in bar_data.get("stop_ranges", []):
+        freezes.append((s, e, "stop"))
     for s, e in bar_data["glow_ranges"]:
         freezes.append((s, e, "glow"))
 
@@ -500,10 +654,14 @@ def _log_music_video_timeline(ctx, bar_data, bar_segments, music_start_s):
         if kind == "quieting":
             desc = (f"start fade-to-black, current image held; "
                     f"synthetic cut hidden inside hold")
+        elif kind == "stop":
+            desc = ("start quick fade-to-black (¼ bar), held until restart; "
+                    "synthetic cut hidden inside hold")
+        elif kind == "bleak":
+            desc = ("fade to darkened b/w grade, pictures keep changing, "
+                    "until restart")
         elif kind == "restart":
-            desc = "end quiet, next image fully visible"
-        elif kind == "extend":
-            desc = "freeze picture until next event"
+            desc = "end quiet/stop/bleak, image normal again"
         elif kind == "glow":
             desc = "start white glow, α 0→1 until next event"
         elif kind == "flash":
@@ -526,16 +684,19 @@ def _log_music_video_timeline(ctx, bar_data, bar_segments, music_start_s):
 
     entries.sort(key=lambda x: (x[0], x[1]))
 
-    ctx.log("Music/video timeline (music_t → video_t):")
+    lines = ["Music/video timeline (music_t → video_t):"]
     for mt, _order, kind, desc in entries:
         vt = music_start_s + mt
-        ctx.log(f"  {mt:8.3f} → {vt:8.3f}  {kind:14s}  {desc}")
+        lines.append(f"  {mt:8.3f} → {vt:8.3f}  {kind:14s}  {desc}")
+    for ln in lines:
+        ctx.log(ln)
+    return lines
 
 
 def _build_bar_segments(bar_data):
     """Emit image-only segments spanning [bar_times[0], bar_times[-1]].
 
-    Bars falling inside any freeze range (quiet, extend, glow) are
+    Bars falling inside any freeze range (quiet, stop, glow) are
     consumed — no picture change happens while the underlying image is
     being held or overlaid.
 
@@ -558,12 +719,21 @@ def _build_bar_segments(bar_data):
     """
     bar_times = bar_data["bar_times"]
     half_crossfade = CROSSFADE_S / 2.0
-    freeze_ranges = (list(bar_data["quiet_ranges"])
-                     + list(bar_data["extend_ranges"])
+    # "stop" ranges behave exactly like quiet ranges here (freeze + a
+    # synthetic cut so a new image emerges from black at restart).
+    blackout_ranges = (list(bar_data["quiet_ranges"])
+                       + list(bar_data.get("stop_ranges", [])))
+    b_starts = {s for s, _ in blackout_ranges}
+    freeze_ranges = (blackout_ranges
                      + list(bar_data["glow_ranges"]))
 
     quiet_cuts = []
-    for s, e in bar_data["quiet_ranges"]:
+    for s, e in blackout_ranges:
+        if e in b_starts:
+            # Immediately followed by another blackout: no reveal here — the
+            # new image emerges at the end of the blackout chain instead, so
+            # the picture never flashes between the two blackouts.
+            continue
         L = e - s
         if L < CROSSFADE_S:
             # Even the earliest possible cut (T_q + half_crossfade) would
@@ -1374,8 +1544,8 @@ def run(*, folder, num_images=20, aspect="16:9",
         freeze_summary = []
         if bar_data["quiet_ranges"]:
             freeze_summary.append(f"{len(bar_data['quiet_ranges'])} quiet")
-        if bar_data["extend_ranges"]:
-            freeze_summary.append(f"{len(bar_data['extend_ranges'])} extend")
+        if bar_data.get("stop_ranges"):
+            freeze_summary.append(f"{len(bar_data['stop_ranges'])} stop")
         if bar_data["glow_ranges"]:
             freeze_summary.append(f"{len(bar_data['glow_ranges'])} glow")
         if n > image_slot_count:
@@ -1630,7 +1800,8 @@ def run(*, folder, num_images=20, aspect="16:9",
                 per_slide_frames[0] - crossfade_frames / 2.0) / FPS
         else:
             image_onset_s = gimmick_duration
-        flash_windows, glow_ramps, quiet_windows = _compute_overlay_windows(
+        (flash_windows, glow_ramps, quiet_windows,
+         bleak_windows) = _compute_overlay_windows(
             bar_data, image_onset_s, bar_data["bar_times"][0],
             FLASH_DURATION_S, QUIET_FADE_IN_FRACTION,
             QUIET_RESTART_FADE_S)
@@ -1639,6 +1810,7 @@ def run(*, folder, num_images=20, aspect="16:9",
         flash_windows = []
         glow_ramps = []
         quiet_windows = []
+        bleak_windows = []
 
     # Text overlays sit on top of the quiet's black overlay: for each text
     # assigned to a quiet range, the text's α curve tracks the black
@@ -1719,12 +1891,15 @@ def run(*, folder, num_images=20, aspect="16:9",
                                 f"({FLASH_DURATION_S:.2f}s)")
         if glow_ramps:
             overlay_bits.append(f"{len(glow_ramps)} glow (0→1 to next event)")
-        if quiet_windows:
-            overlay_bits.append(f"{len(quiet_windows)} quiet "
+        if bar_data is not None and bar_data["quiet_ranges"]:
+            overlay_bits.append(f"{len(bar_data['quiet_ranges'])} quiet "
                                 f"(fade→black→fade)")
-        if bar_data is not None and bar_data["extend_ranges"]:
-            overlay_bits.append(f"{len(bar_data['extend_ranges'])} extend "
-                                f"(hold picture)")
+        if bar_data is not None and bar_data.get("stop_ranges"):
+            overlay_bits.append(f"{len(bar_data['stop_ranges'])} stop "
+                                f"(quick fade→black→fade)")
+        if bar_data is not None and bar_data.get("bleak_ranges"):
+            overlay_bits.append(f"{len(bar_data['bleak_ranges'])} bleak "
+                                f"(darkened b/w grade)")
         if overlay_bits:
             ctx.log("Freeze/overlay events: " + ", ".join(overlay_bits) + ".")
 
@@ -1836,8 +2011,10 @@ def run(*, folder, num_images=20, aspect="16:9",
     elif has_clicks:
         audio_label = "[clicks]"
 
+    timeline_lines = []
     if bar_data is not None:
-        _log_music_video_timeline(ctx, bar_data, bar_segments, music_start_s)
+        timeline_lines = _log_music_video_timeline(
+            ctx, bar_data, bar_segments, music_start_s)
 
     cmd += extra_inputs
     if audio_label is not None:
@@ -1898,9 +2075,7 @@ def run(*, folder, num_images=20, aspect="16:9",
 
     slide_frame_index = [0]
     have_overlays = bool(flash_windows or glow_ramps or quiet_windows
-                         or text_overlay_windows)
-    white_frame_cached = (Image.new("RGB", (out_w, out_h), (255, 255, 255))
-                          if (flash_windows or glow_ramps) else None)
+                         or bleak_windows or text_overlay_windows)
     black_frame_cached = (Image.new("RGB", (out_w, out_h), (0, 0, 0))
                           if quiet_windows else None)
 
@@ -1929,8 +2104,8 @@ def run(*, folder, num_images=20, aspect="16:9",
         freezes = []
         for s, e in bar_data["quiet_ranges"]:
             freezes.append((s, e, "quiet"))
-        for s, e in bar_data["extend_ranges"]:
-            freezes.append((s, e, "extend"))
+        for s, e in bar_data.get("stop_ranges", []):
+            freezes.append((s, e, "stop"))
         for s, e in bar_data["glow_ranges"]:
             freezes.append((s, e, "glow"))
 
@@ -1966,8 +2141,9 @@ def run(*, folder, num_images=20, aspect="16:9",
                                    "desc": "(muted)", "order": 2})
         event_desc = {
             "quieting": "fade→black start",
-            "restart":  "quiet ended, image visible",
-            "extend":   "hold picture",
+            "stop":     "quick fade→black start",
+            "bleak":    "→ darkened b/w grade",
+            "restart":  "quiet/stop/bleak ended, image normal",
             "glow":     "→ white ramp start",
             "flash":    f"white {FLASH_DURATION_S:.2f}s",
             "crop":     "(crop rebase)",
@@ -2106,16 +2282,35 @@ def run(*, folder, num_images=20, aspect="16:9",
         t_v = gimmick_duration + slide_frame_index[0] / FPS
         wa = ba = ta = 0.0
         if have_overlays:
-            fa, ga, ba = _overlay_at(
-                t_v, flash_windows, glow_ramps, quiet_windows)
+            fa, ga, ba, bl, bleak_params = _overlay_at(
+                t_v, flash_windows, glow_ramps, quiet_windows, bleak_windows)
+            if bl > 0.0 and bleak_params is not None:
+                # Bleak: brightness/contrast/colour-overlay grade. Applied
+                # first so any flash/glow/black overlays sit on top of the
+                # graded image. Interpolates from normal (bl=0) to full
+                # grade (bl=1).
+                frame = _apply_bleak(frame, bl, bleak_params)
             wa = max(fa, ga)  # combined white level, for the debug HUD
             if fa > 0.0:
                 # Flash = the current image, blown bright — not pure white.
                 brightened = ImageEnhance.Brightness(frame).enhance(
                     FLASH_BRIGHTNESS_FACTOR)
                 frame = Image.blend(frame, brightened, fa)
-            if ga > 0.0 and white_frame_cached is not None:
-                frame = Image.blend(frame, white_frame_cached, ga)
+            if ga > 0.0:
+                # Glow, two phases across the ramp: first half fades the
+                # picture to its own average colour; second half fades that
+                # flat colour up to a near-white tint of it.
+                avg = frame.resize((1, 1), Image.BOX).getpixel((0, 0))
+                if ga <= 0.5:
+                    target = Image.new("RGB", frame.size, avg)
+                    frame = Image.blend(frame, target, ga / 0.5)
+                else:
+                    bright = tuple(
+                        int(round(c + (255 - c) * GLOW_COLOR_WHITE_MIX))
+                        for c in avg)
+                    base = Image.new("RGB", frame.size, avg)
+                    peak = Image.new("RGB", frame.size, bright)
+                    frame = Image.blend(base, peak, (ga - 0.5) / 0.5)
             if ba > 0.0 and black_frame_cached is not None:
                 frame = Image.blend(frame, black_frame_cached, ba)
             if text_overlay_windows:
@@ -2316,4 +2511,21 @@ def run(*, folder, num_images=20, aspect="16:9",
         ctx.log(f"Stopped by user — partial video saved to {output}")
     else:
         ctx.log(f"Video saved to {output}")
+
+    # Persist the full music/video timeline next to where the app runs, with
+    # the source music JSON path so both can be used together for debugging.
+    if timeline_lines:
+        timeline_path = os.path.abspath("timeline.txt")
+        header = [
+            f"Music JSON: {bar_data.get('json_path', '?')}",
+            f"Video:      {os.path.abspath(output)}",
+            "",
+        ]
+        try:
+            with open(timeline_path, "w") as f:
+                f.write("\n".join(header + timeline_lines) + "\n")
+            ctx.log(f"Timeline written to {timeline_path}")
+        except OSError as exc:
+            ctx.log(f"Could not write timeline.txt: {exc}")
+
     return output

@@ -4,6 +4,7 @@ images. Used by both `carousel` (cuts the strip into slide JPEGs) and
 """
 
 import os
+import random
 import re
 
 from PIL import Image
@@ -27,7 +28,8 @@ def natural_sort_key(filename):
             for c in re.split(r'(\d+)', filename)]
 
 
-def build_panorama_strip(folder, num_slides, aspect_ratio, ctx=None):
+def build_panorama_strip(folder, num_slides, aspect_ratio, ctx=None,
+                         random_order=False):
     """Assemble a horizontal strip from images in `folder`.
 
     If `num_slides` is an int: build a strip exactly `num_slides * section_width`
@@ -36,6 +38,10 @@ def build_panorama_strip(folder, num_slides, aspect_ratio, ctx=None):
 
     If `num_slides` is None: include every image in the folder and derive the
     slide count from the resulting width (rounded up to whole slides).
+
+    If `random_order` is True, source images are shuffled instead of
+    natural-sorted by filename, so only the images needed to fill the strip are
+    picked, in random order.
 
     Returns (strip, num_slides_actual, section_width, working_height,
              out_width, out_height).
@@ -64,13 +70,16 @@ def build_panorama_strip(folder, num_slides, aspect_ratio, ctx=None):
     else:
         ctx.log(f"Total strip width needed: {total_needed}px for {num_slides} slides")
 
-    files = sorted(
-        [f for f in os.listdir(folder)
-         if f.lower().endswith((".jpg", ".jpeg", ".png"))],
-        key=natural_sort_key,
-    )
+    files = [f for f in os.listdir(folder)
+             if f.lower().endswith((".jpg", ".jpeg", ".png"))]
     if not files:
         raise RuntimeError(f"No images found in {folder}")
+
+    if random_order:
+        random.shuffle(files)
+        ctx.log("Random order: source images shuffled.")
+    else:
+        files.sort(key=natural_sort_key)
 
     ctx.log(f"Found {len(files)} source images")
 

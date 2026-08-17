@@ -1,0 +1,13 @@
+# Python dependencies for Image Tools.
+# Unpinned so `run.sh` can rebuild the venv on any Python 3 it finds.
+
+# Core (required)
+pillow
+numpy
+scipy
+piexif
+
+# Optional: audio beat detection for reels/ken-burns bar timing.
+# The code falls back to fixed-interval timing if this is missing, but it
+# pulls a large dependency tree (numba, scikit-learn, soundfile, ...).
+librosa

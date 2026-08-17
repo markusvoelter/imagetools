@@ -27,6 +27,7 @@ from . import ken_burns as ken_burns_mod
 from . import reel as reel_mod
 from . import rotate_video as rotate_video_mod
 from . import scroll_video as scroll_video_mod
+from . import shuffle_reveal as shuffle_reveal_mod
 from . import split as split_mod
 from . import walls as walls_mod
 
@@ -723,6 +724,8 @@ class CarouselTab(RunnerTab):
         self.num_slides = self.pvar("num_slides", "20")
         self.aspect = self.pvar("aspect", "9:16")
         self.output_dir = self.pvar("output_dir", "")
+        self.random_order = self.pvar("random_order", False, tk.BooleanVar)
+        self.num_sets = self.pvar("num_sets", "1")
 
         grid = ttk.Frame(self)
         grid.pack(fill="x")
@@ -731,6 +734,21 @@ class CarouselTab(RunnerTab):
         r = 0
         ttk.Label(grid, text="Number of slides").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.num_slides, width=10).grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Checkbutton(grid,
+                        text="Random order (off = alphabetical by filename)",
+                        variable=self.random_order
+                        ).grid(row=r, column=0, columnspan=3, sticky="w", pady=2)
+        r += 1
+
+        ttk.Label(grid, text="Number of sets").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.num_sets, width=10).grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="(>1 writes each set to set_NN/ under the image folder; "
+                             "combine with random order for different results)",
+                  foreground="gray").grid(row=r, column=0, columnspan=3, sticky="w")
         r += 1
 
         ttk.Label(grid, text="Aspect ratio").grid(row=r, column=0, sticky="w", pady=2)
@@ -759,10 +777,18 @@ class CarouselTab(RunnerTab):
             n = int(self.num_slides.get())
         except ValueError:
             raise ValueError("Number of slides must be an integer.")
+        try:
+            num_sets = int(self.num_sets.get() or "1")
+        except ValueError:
+            raise ValueError("Number of sets must be an integer.")
+        if num_sets < 1:
+            raise ValueError("Number of sets must be at least 1.")
         kw = {
             "folder": folder,
             "num_slides": n,
             "aspect_ratio": self.aspect.get(),
+            "random_order": self.random_order.get(),
+            "num_sets": num_sets,
         }
         if self.output_dir.get().strip():
             kw["output_dir"] = self.output_dir.get().strip()
@@ -899,6 +925,179 @@ class ScrollVideoTab(RunnerTab):
         end_screen = template_for(self.aspect.get(), "end-screen")
         if end_screen:
             kw["end_screen"] = end_screen
+        if self.output.get().strip():
+            kw["output"] = self.output.get().strip()
+        return kw
+
+
+# ---------------------------------------------------------------------------
+# Fast Scroll
+# ---------------------------------------------------------------------------
+
+class ShuffleRevealTab(RunnerTab):
+    persist_prefix = "shuffle_reveal"
+
+    def __init__(self, master):
+        super().__init__(master, shuffle_reveal_mod.run,
+                         default_input_dir=os.path.join(PROJECT_ROOT, "imagesSwipeys2"))
+
+    def _build_form(self):
+        self.aspect = self.pvar("aspect", "9:16")
+        self.direction = self.pvar("direction", shuffle_reveal_mod.DIRECTION_HORIZONTAL)
+        self.hold_s = self.pvar("hold_s", "1.5")
+        self.num_images = self.pvar("num_images", "0")
+        self.min_intermediate = self.pvar(
+            "min_intermediate", str(shuffle_reveal_mod.DEFAULT_MIN_INTERMEDIATE))
+        self.max_intermediate = self.pvar(
+            "max_intermediate", str(shuffle_reveal_mod.DEFAULT_MAX_INTERMEDIATE))
+        self.random_order = self.pvar("random_order", False, tk.BooleanVar)
+        self.reverse = self.pvar("reverse", False, tk.BooleanVar)
+        self.music = self.pvar(
+            "music",
+            "/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music",
+        )
+        self.output = self.pvar("output", "")
+
+        grid = ttk.Frame(self)
+        grid.pack(fill="x")
+        grid.columnconfigure(1, weight=1)
+
+        r = 0
+        ttk.Label(grid, text="Aspect ratio").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Combobox(grid, textvariable=self.aspect,
+                     values=list(shuffle_reveal_mod.ASPECT_RATIOS.keys()),
+                     state="readonly").grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="Direction").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Combobox(grid, textvariable=self.direction,
+                     values=list(shuffle_reveal_mod.DIRECTIONS),
+                     state="readonly").grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="Hold per image (s)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.hold_s, width=10
+                  ).grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="Number of images (0 = all)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.num_images, width=10
+                  ).grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="Intermediate images (min)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.min_intermediate, width=10
+                  ).grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="Intermediate images (max)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.max_intermediate, width=10
+                  ).grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Checkbutton(grid,
+                        text="Randomize order (off = sorted by filename)",
+                        variable=self.random_order
+                        ).grid(row=r, column=0, columnspan=3, sticky="w", pady=2)
+        r += 1
+
+        ttk.Checkbutton(grid,
+                        text="Reverse (randomly scroll some steps the opposite way)",
+                        variable=self.reverse
+                        ).grid(row=r, column=0, columnspan=3, sticky="w", pady=2)
+        r += 1
+
+        ttk.Label(grid, text="Music file or folder (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.music).grid(row=r, column=1, sticky="ew", padx=4)
+        music_btns = ttk.Frame(grid)
+        music_btns.grid(row=r, column=2, sticky="w")
+        ttk.Button(music_btns, text="File...",
+                   command=self._pick_music_file).pack(side="left")
+        ttk.Button(music_btns, text="Folder...",
+                   command=lambda: pick_dir(
+                       self.music,
+                       self.music.get() or os.path.expanduser("~"))
+                   ).pack(side="left", padx=(4, 0))
+        r += 1
+
+        ttk.Label(grid, text="Output file (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.output).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="Save as...", command=self._pick_output
+                   ).grid(row=r, column=2)
+        r += 1
+
+        ttk.Label(grid,
+                  text="(between each image, a random number of images in the "
+                       "min-max range whip past very fast)",
+                  foreground="gray").grid(row=r, column=0, columnspan=3, sticky="w")
+
+    def _pick_output(self):
+        ensure_output_dir()
+        path = filedialog.asksaveasfilename(
+            defaultextension=".mp4",
+            filetypes=[("MP4", "*.mp4"), ("All files", "*.*")],
+            initialdir=OUTPUT_DIR,
+        )
+        if path:
+            self.output.set(path)
+
+    def _pick_music_file(self):
+        current = self.music.get().strip()
+        if current and os.path.isfile(current):
+            initial_dir = os.path.dirname(current)
+        elif current and os.path.isdir(current):
+            initial_dir = current
+        else:
+            initial_dir = os.path.expanduser("~")
+        path = filedialog.askopenfilename(
+            initialdir=initial_dir,
+            filetypes=[("Audio", "*.mp3 *.m4a *.wav *.flac *.aac *.ogg *.opus"),
+                       ("All files", "*.*")],
+            title="Pick an audio file",
+        )
+        if path:
+            self.music.set(path)
+
+    def _gather_kwargs(self):
+        folder = _current_image_folder()
+        if not folder:
+            raise ValueError("Pick an images folder in the project bar.")
+        kw = {
+            "folder": folder,
+            "aspect_ratio": self.aspect.get(),
+            "direction": self.direction.get(),
+        }
+        if self.hold_s.get().strip():
+            try:
+                hold = float(self.hold_s.get())
+            except ValueError:
+                raise ValueError("Hold per image must be a number.")
+            if hold <= 0:
+                raise ValueError("Hold per image must be > 0.")
+            kw["hold_s"] = hold
+        if self.num_images.get().strip():
+            try:
+                num_images = int(self.num_images.get())
+            except ValueError:
+                raise ValueError("Number of images must be an integer.")
+            if num_images < 0:
+                raise ValueError("Number of images must be >= 0.")
+            kw["num_images"] = num_images
+        try:
+            min_int = int(self.min_intermediate.get())
+            max_int = int(self.max_intermediate.get())
+        except ValueError:
+            raise ValueError("Intermediate image counts must be integers.")
+        if min_int < 0 or max_int < 0:
+            raise ValueError("Intermediate image counts must be >= 0.")
+        if max_int < min_int:
+            raise ValueError("Max intermediate images must be >= min.")
+        kw["min_intermediate"] = min_int
+        kw["max_intermediate"] = max_int
+        kw["random_order"] = self.random_order.get()
+        kw["reverse"] = self.reverse.get()
+        if self.music.get().strip():
+            kw["music"] = self.music.get().strip()
         if self.output.get().strip():
             kw["output"] = self.output.get().strip()
         return kw
@@ -1562,6 +1761,7 @@ def main():
     nb.add(RotateVideoTab(nb), text="Rotate Video")
     nb.add(CarouselTab(nb),    text="Insta Carousel")
     nb.add(ScrollVideoTab(nb), text="Scroll Video")
+    nb.add(ShuffleRevealTab(nb), text="Fast Scroll")
     nb.add(ReelTab(nb),        text="Insta Reel")
     nb.add(KenBurnsTab(nb),    text="Ken Burns")
     nb.add(WallsTab(nb),       text="Walls")
