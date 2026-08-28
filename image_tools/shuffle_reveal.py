@@ -10,6 +10,7 @@ direction "horizontal": images scroll in from the right (motion right-to-left).
 direction "vertical":   images scroll in from the top (motion top-to-bottom).
 """
 
+import json
 import os
 import random
 import subprocess
@@ -70,6 +71,84 @@ def _compose_blurred(direction, t_start, t_end, cur, nxt, w, h, samples,
                           dtype=np.float32)
     acc /= samples
     return Image.fromarray(acc.astype(np.uint8), "RGB")
+
+
+def _load_bar_times(audio_path):
+    """Return the sorted bar timestamps (seconds) from `<audio>.json`, or None.
+
+    Mirrors the sidecar format used by ken_burns: a top-level "bars" list of
+    {"time": <seconds>} objects. Bars flagged "muted" (and not "manual") carry
+    no picture change, so they are skipped. Needs at least two usable bars.
+    """
+    if not audio_path:
+        return None
+    json_path = os.path.splitext(audio_path)[0] + ".json"
+    if not os.path.isfile(json_path):
+        return None
+    try:
+        with open(json_path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    times = []
+    for b in data.get("bars") or []:
+        try:
+            t = float(b["time"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if t < 0:
+            continue
+        if b.get("muted") is True and b.get("manual") is not True:
+            continue
+        times.append(t)
+    times = sorted(times)
+    return times if len(times) >= 2 else None
+
+
+def _build_schedule(gap_counts, hold_frames, bar_times, fps):
+    """Decide how long each real image is held before its whip burst, plus a
+    final tail hold. Returns (pre_holds, tail_frames).
+
+    Without `bar_times`, every hold is the fixed `hold_frames`. With bar times,
+    the hold is stretched so each burst *lands* the next real image exactly on
+    a bar: for each transition we take the earliest bar that leaves room for the
+    burst, and hold the current image for the remainder. Bars are consumed in
+    order; if they run out, we continue at the median bar spacing.
+    """
+    n_gaps = len(gap_counts)
+    burst_frames = [(count + 1) * FAST_TRANS_FRAMES for count in gap_counts]
+
+    if not bar_times:
+        return [hold_frames] * n_gaps, hold_frames
+
+    bar_frames = [int(round(t * fps)) for t in bar_times]
+    diffs = [bar_frames[k + 1] - bar_frames[k]
+             for k in range(len(bar_frames) - 1) if bar_frames[k + 1] > bar_frames[k]]
+    median_gap = sorted(diffs)[len(diffs) // 2] if diffs else fps
+
+    pre_holds = []
+    prev = 0          # cumulative frame where the current image's hold begins
+    ptr = 0           # next unconsumed bar
+    for i in range(n_gaps):
+        earliest = prev + burst_frames[i]
+        while ptr < len(bar_frames) and bar_frames[ptr] < earliest:
+            ptr += 1
+        if ptr < len(bar_frames):
+            target = bar_frames[ptr]
+            ptr += 1
+        else:
+            # ran out of annotated bars — keep the beat going at median spacing
+            target = prev + max(burst_frames[i], median_gap)
+        pre_holds.append(target - prev - burst_frames[i])
+        prev = target
+
+    # tail: hold the last image until the next bar, else one median beat
+    tail_frames = median_gap
+    for bf in bar_frames:
+        if bf > prev:
+            tail_frames = bf - prev
+            break
+    return pre_holds, tail_frames
 
 
 def run(*, folder, aspect_ratio="9:16", direction=DIRECTION_HORIZONTAL,
@@ -165,21 +244,31 @@ def run(*, folder, aspect_ratio="9:16", direction=DIRECTION_HORIZONTAL,
     fps = SHUFFLE_FPS
     hold_frames = max(1, int(round(hold_s * fps)))
 
-    # Pick a random number of intermediate images per transition up front, so
-    # the frame budget matches what the render loop actually emits.
-    gap_counts = [random.randint(min_intermediate, max_intermediate)
-                  for _ in range(n - 1)]
-    # each gap: `count` random whips + 1 reveal step, then the reveal is held
-    total_frames = hold_frames + sum(
-        (count + 1) * FAST_TRANS_FRAMES + hold_frames for count in gap_counts)
-    total_seconds = total_frames / fps
-    ctx.log(f"Fast scroll: {n} images, ~{total_seconds:.1f}s @ {fps}fps")
-
     audio_track = None
     if music:
         audio_track = _resolve_audio_track(music, ctx)
         if audio_track:
             ctx.log(f"Audio track: {audio_track}")
+
+    # If the music has a sidecar bar-timing JSON, sync image reveals to bars
+    # and ignore `hold_s`; otherwise fall back to the fixed hold.
+    bar_times = _load_bar_times(audio_track)
+    if bar_times:
+        ctx.log(f"Bar sync: {len(bar_times)} bars from sidecar JSON — "
+                f"ignoring hold-per-image, landing each reveal on a bar.")
+
+    # Pick a random number of intermediate images per transition up front, so
+    # the frame budget matches what the render loop actually emits.
+    gap_counts = [random.randint(min_intermediate, max_intermediate)
+                  for _ in range(n - 1)]
+    pre_holds, tail_frames = _build_schedule(
+        gap_counts, hold_frames, bar_times, fps)
+    # each gap: a pre-burst hold + (`count` whips + 1 reveal), then a tail hold
+    total_frames = tail_frames + sum(
+        pre_holds[i] + (gap_counts[i] + 1) * FAST_TRANS_FRAMES
+        for i in range(n - 1))
+    total_seconds = total_frames / fps
+    ctx.log(f"Fast scroll: {n} images, ~{total_seconds:.1f}s @ {fps}fps")
 
     cmd = [
         'ffmpeg', '-y',
@@ -216,18 +305,20 @@ def run(*, folder, aspect_ratio="9:16", direction=DIRECTION_HORIZONTAL,
         proc.stdin.write(frame.tobytes())
 
     try:
-        # hold the first real image
-        first_bytes = frames[0].tobytes()
-        for _ in range(hold_frames):
-            if ctx.cancelled():
-                break
-            proc.stdin.write(first_bytes)
-
         for i in range(n - 1):
             if ctx.cancelled():
                 break
             cur = frames[i]
             nxt = frames[i + 1]
+
+            # hold the current real image until its burst is due (bar-timed or
+            # the fixed hold); the reveal at the end of the burst then lands on
+            # the target moment
+            cur_bytes = cur.tobytes()
+            for _ in range(pre_holds[i]):
+                if ctx.cancelled():
+                    break
+                proc.stdin.write(cur_bytes)
 
             # Build the intermediate sequence: random "other" images whipping
             # past, with the LAST intermediate being the next real image itself
@@ -256,12 +347,13 @@ def run(*, folder, aspect_ratio="9:16", direction=DIRECTION_HORIZONTAL,
                                           MOTION_BLUR_SAMPLES, step_reverse))
                 cur = target
 
-            # hold the next real image
-            nxt_bytes = nxt.tobytes()
-            for _ in range(hold_frames):
+        # tail: hold the final real image
+        if not ctx.cancelled():
+            last_bytes = frames[n - 1].tobytes()
+            for _ in range(tail_frames):
                 if ctx.cancelled():
                     break
-                proc.stdin.write(nxt_bytes)
+                proc.stdin.write(last_bytes)
     except BrokenPipeError:
         pass
     finally:

@@ -23,6 +23,7 @@ from . import (
 )
 from . import carousel as carousel_mod
 from . import collage as collage_mod
+from . import filmstrip as filmstrip_mod
 from . import ken_burns as ken_burns_mod
 from . import reel as reel_mod
 from . import rotate_video as rotate_video_mod
@@ -578,6 +579,108 @@ class CollageTab(RunnerTab):
             finally:
                 self.log_queue.put(None)
         return target
+
+
+# ---------------------------------------------------------------------------
+# Film Strip
+# ---------------------------------------------------------------------------
+
+class FilmstripTab(RunnerTab):
+    persist_prefix = "filmstrip"
+
+    def __init__(self, master):
+        super().__init__(master, filmstrip_mod.run,
+                         default_input_dir=os.path.join(PROJECT_ROOT, "imageCollage"))
+
+    def _build_form(self):
+        self.num_columns = self.pvar("num_columns", "2")
+        self.repetitions = self.pvar("repetitions", "1")
+        self.allow_repeat = self.pvar("allow_repeat", False, tk.BooleanVar)
+        self.crop = self.pvar("crop", True, tk.BooleanVar)
+        self.bg = self.pvar("bg", "")
+        self.output = self.pvar("output", "")
+
+        grid = ttk.Frame(self)
+        grid.pack(fill="x")
+        grid.columnconfigure(1, weight=1)
+
+        r = 0
+        ttk.Label(grid, text="Number of columns").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.num_columns, width=10
+                  ).grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Label(grid, text="Repetitions").grid(row=r, column=0, sticky="w", pady=2)
+        rep_row = ttk.Frame(grid)
+        rep_row.grid(row=r, column=1, columnspan=2, sticky="w", padx=4)
+        ttk.Entry(rep_row, textvariable=self.repetitions, width=10).pack(side="left")
+        ttk.Checkbutton(rep_row, text="allow photos to repeat across outputs",
+                        variable=self.allow_repeat).pack(side="left", padx=(10, 0))
+        r += 1
+
+        ttk.Checkbutton(grid,
+                        text="Crop to 9:16 (off = keep width, height follows "
+                             "each image's aspect)",
+                        variable=self.crop
+                        ).grid(row=r, column=0, columnspan=3, sticky="w", pady=2)
+        r += 1
+
+        ttk.Label(grid, text="Background color hex (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.bg, width=12).grid(row=r, column=1, sticky="w", padx=4)
+        ttk.Button(grid, text="Pick color...",
+                   command=lambda: pick_color(self.bg)).grid(row=r, column=2)
+        r += 1
+
+        ttk.Label(grid, text="Output file (optional)").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.output).grid(row=r, column=1, sticky="ew", padx=4)
+        ttk.Button(grid, text="Save as...", command=self._pick_output
+                   ).grid(row=r, column=2)
+        r += 1
+
+        ttk.Label(grid,
+                  text="(output is 9:16, auto-filled with as many random photos "
+                       "as fit; background defaults to dark grey; repetitions "
+                       "make several images without reusing the same photo)",
+                  foreground="gray").grid(row=r, column=0, columnspan=3, sticky="w")
+
+    def _pick_output(self):
+        ensure_output_dir()
+        path = filedialog.asksaveasfilename(
+            defaultextension=".jpg",
+            filetypes=[("JPEG", "*.jpg"), ("All files", "*.*")],
+            initialdir=OUTPUT_DIR,
+        )
+        if path:
+            self.output.set(path)
+
+    def _gather_kwargs(self):
+        folder = _current_image_folder()
+        if not folder:
+            raise ValueError("Pick an images folder in the project bar.")
+        try:
+            num_columns = int(self.num_columns.get())
+        except ValueError:
+            raise ValueError("Number of columns must be an integer.")
+        if num_columns < 1:
+            raise ValueError("Number of columns must be at least 1.")
+        try:
+            repetitions = int(self.repetitions.get())
+        except ValueError:
+            raise ValueError("Repetitions must be an integer.")
+        if repetitions < 1:
+            raise ValueError("Repetitions must be at least 1.")
+        kw = {
+            "folder": folder,
+            "num_columns": num_columns,
+            "repetitions": repetitions,
+            "allow_repeat": self.allow_repeat.get(),
+            "crop": self.crop.get(),
+        }
+        if self.bg.get().strip():
+            kw["bg"] = self.bg.get().strip()
+        if self.output.get().strip():
+            kw["output"] = self.output.get().strip()
+        return kw
 
 
 # ---------------------------------------------------------------------------
@@ -1758,6 +1861,7 @@ def main():
     nb.pack(fill="both", expand=True, padx=8, pady=8)
 
     nb.add(CollageTab(nb),     text="Collage")
+    nb.add(FilmstripTab(nb),   text="Film Strip")
     nb.add(RotateVideoTab(nb), text="Rotate Video")
     nb.add(CarouselTab(nb),    text="Insta Carousel")
     nb.add(ScrollVideoTab(nb), text="Scroll Video")

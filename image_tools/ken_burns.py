@@ -97,6 +97,8 @@ KB_TEXT_SLIDE_BACKDROP_DARKEN = 0.80       # text slide bg: darken previous phot
 KB_TEXT_SLIDE_BACKDROP_DESATURATE = 0.5    # text slide bg: desaturate previous photo by this (1 = fully grey)
 GIMMICK_START_FRAMES_PER_PIC = 1  # fastest gimmick pace (1 frame = 30 pics/sec at FPS=30)
 GIMMICK_END_FRAMES_PER_PIC = 3    # slowest gimmick pace (3 frames = 10 pics/sec at FPS=30)
+GIMMICK_MAX_DURATION_S = 3.0      # cap the flip-through intro; if all images would
+                                  # run longer, a random subset is shown instead
 GIMMICK_CLICK_FREQ_HZ = 700   # carrier (tonal) frequency of the per-image "click"
 GIMMICK_CLICK_DECAY_S = 0.003 # exponential decay time constant of the click
 GIMMICK_CLICK_AMP = 0.6       # peak amplitude of the first click
@@ -961,13 +963,18 @@ def _split_title_lines(text, max_chars=KB_TITLE_LINE_MAX_CHARS):
 
 def _measure_text_bbox(text, font, line_spacing_px=4):
     """Return (left, top, right, bottom) bbox of `text` (multi-line aware).
-    `line_spacing_px` is extra pixels between lines (PIL's default is 4)."""
+    `line_spacing_px` is extra pixels between lines (PIL's default is 4).
+
+    Both single- and multi-line are measured with the same ascender ("la")
+    anchor that `_draw_text_with_shadow` draws with, so callers that offset a
+    draw position by `-bbox[1]` land the ink exactly where the bbox says (this
+    keeps the one-line gap between title and subtitle correct)."""
     measure_img = Image.new("RGBA", (1, 1))
     draw = ImageDraw.Draw(measure_img)
     if "\n" in text:
         return draw.multiline_textbbox(
             (0, 0), text, font=font, align="center", spacing=line_spacing_px)
-    return draw.textbbox((0, 0), text, font=font, anchor="lt")
+    return draw.textbbox((0, 0), text, font=font, anchor="la")
 
 
 def _find_font_size_for_width(text, target_w, max_size,
@@ -1303,6 +1310,38 @@ def _composite_title_onto_frame(frame_rgb, title_overlay_rgba, alpha):
     return out
 
 
+def _gimmick_ramp(count):
+    """Frames-per-image list for a `count`-image gimmick flip-through.
+
+    Splits the images across the K = (end - start + 1) pace buckets as evenly
+    as possible; earlier (faster) buckets absorb any remainder so the ramp
+    starts fast and slows down.
+    """
+    n_buckets = GIMMICK_END_FRAMES_PER_PIC - GIMMICK_START_FRAMES_PER_PIC + 1
+    base = count // n_buckets
+    remainder = count % n_buckets
+    lst = []
+    for k in range(n_buckets):
+        size = base + (1 if k < remainder else 0)
+        lst.extend([GIMMICK_START_FRAMES_PER_PIC + k] * size)
+    return lst
+
+
+def _max_gimmick_images(count, budget_frames):
+    """Largest image count in [1, count] whose flip-through ramp fits within
+    `budget_frames`. Ramp length is monotonic in the count, so binary-search."""
+    if count <= 1 or sum(_gimmick_ramp(count)) <= budget_frames:
+        return count
+    lo, hi, best = 1, count, 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if sum(_gimmick_ramp(mid)) <= budget_frames:
+            best, lo = mid, mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
 def _gimmick_frame(image_path, out_w, out_h, bg_color=(0, 0, 0)):
     """A lightweight "flip-through" frame: image fitted in frame on plain bg.
 
@@ -1624,8 +1663,17 @@ def run(*, folder, num_images=20, aspect="16:9",
     title_label = ""
     if title and title.strip():
         title_text_wrapped = _wrap_title_text(title.strip(), out_w, out_h)
-        subtitle_text_wrapped = (_wrap_title_text(subtitle.strip(), out_w, out_h)
-                                 if subtitle and subtitle.strip() else "")
+        if subtitle and subtitle.strip():
+            sub_raw = subtitle.strip()
+            if "|" in sub_raw:
+                # explicit line breaks: honor each "|"-separated part verbatim
+                # (the font is auto-fitted to width, so long lines still fit)
+                subtitle_text_wrapped = "\n".join(
+                    part.strip() for part in sub_raw.split("|") if part.strip())
+            else:
+                subtitle_text_wrapped = _wrap_title_text(sub_raw, out_w, out_h)
+        else:
+            subtitle_text_wrapped = ""
         title_screen_path = None
         if title_screen and title_screen.strip():
             title_screen_path = os.path.abspath(title_screen.strip())
@@ -1718,20 +1766,25 @@ def run(*, folder, num_images=20, aspect="16:9",
     main_seconds = total_main_frames / FPS
 
     if gimmick:
+        # Cap the flip-through at ~GIMMICK_MAX_DURATION_S. Using every image can
+        # run long (the ramp slows to GIMMICK_END_FRAMES_PER_PIC near the end),
+        # so if the full flip-through would exceed the cap, show only a random
+        # subset sized to fit. The subset is kept in the picked order for a
+        # coherent (if abbreviated) preview.
+        budget_frames = int(round(GIMMICK_MAX_DURATION_S * FPS))
+        m = _max_gimmick_images(n, budget_frames)
+        if m < n:
+            gimmick_idxs = sorted(random.sample(range(n), m))
+            gimmick_picks = [picks[i] for i in gimmick_idxs]
+            ctx.log(f"Gimmick intro capped at ~{GIMMICK_MAX_DURATION_S:.0f}s: "
+                    f"showing a random {m} of {n} image(s).")
+        else:
+            gimmick_picks = list(picks)
+
         # Image ramp: integer frames per image, one-frame steps from
         # GIMMICK_START_FRAMES_PER_PIC (fastest) to GIMMICK_END_FRAMES_PER_PIC
-        # (slowest). Split n images across those K = (end - start + 1)
-        # buckets as evenly as possible; earlier (faster) buckets get any
-        # remainder so the ramp starts fast and slows down.
-        n_buckets = (GIMMICK_END_FRAMES_PER_PIC
-                     - GIMMICK_START_FRAMES_PER_PIC + 1)
-        base = n // n_buckets
-        remainder = n % n_buckets
-        gimmick_frames_list = []
-        for k in range(n_buckets):
-            size = base + (1 if k < remainder else 0)
-            frames_per_pic = GIMMICK_START_FRAMES_PER_PIC + k
-            gimmick_frames_list.extend([frames_per_pic] * size)
+        # (slowest) across the m gimmick images.
+        gimmick_frames_list = _gimmick_ramp(m)
         gimmick_total_frames = sum(gimmick_frames_list)
         gimmick_duration = gimmick_total_frames / FPS
         # Cumulative start times (seconds) of each gimmick image
@@ -1742,22 +1795,22 @@ def run(*, folder, num_images=20, aspect="16:9",
             _cum += gfpi
         # Audio ramp: continuous linear interpolation of click intervals so
         # the click track sounds like a smooth deceleration, decoupled from
-        # the frame-quantized visuals. The n clicks are placed so the LAST
+        # the frame-quantized visuals. The m clicks are placed so the LAST
         # one lands exactly at gimmick_duration — i.e., on the title-slide
-        # reveal (or the first main slide if no title). (n-1) intervals
+        # reveal (or the first main slide if no title). (m-1) intervals
         # ramp fastest → slowest and fill [0, gimmick_duration], leaving
-        # the last flip-through image silent after the (n-1)-th click.
+        # the last flip-through image silent after the (m-1)-th click.
         ratio = (GIMMICK_END_FRAMES_PER_PIC
                  / GIMMICK_START_FRAMES_PER_PIC)  # slowest/fastest
-        if n == 1:
+        if m == 1:
             click_starts = [gimmick_duration]
-        elif n == 2:
+        elif m == 2:
             click_starts = [0.0, gimmick_duration]
         else:
-            # sum = (n-1) * a * (1 + ratio) / 2 = gimmick_duration
-            a = 2 * gimmick_duration / ((n - 1) * (1 + ratio))
+            # sum = (m-1) * a * (1 + ratio) / 2 = gimmick_duration
+            a = 2 * gimmick_duration / ((m - 1) * (1 + ratio))
             click_intervals = [
-                a * (1 + (ratio - 1) * i / (n - 2)) for i in range(n - 1)
+                a * (1 + (ratio - 1) * i / (m - 2)) for i in range(m - 1)
             ]
             click_starts = [0.0]
             _c = 0.0
@@ -1769,6 +1822,7 @@ def run(*, folder, num_images=20, aspect="16:9",
         # slide (the extra frames are cheap and inaudibly short).
         click_end_boundary = gimmick_duration + 0.1
     else:
+        gimmick_picks = []
         gimmick_frames_list = []
         gimmick_total_frames = 0
         gimmick_duration = 0.0
@@ -1858,10 +1912,11 @@ def run(*, folder, num_images=20, aspect="16:9",
         speed_start = FPS / gimmick_frames_list[0]
         speed_end = FPS / gimmick_frames_list[-1]
         click_target = "title reveal" if title_label else "first slide"
-        ctx.log(f"Gimmick intro: {n} image(s), {gimmick_duration:.2f}s total "
+        ctx.log(f"Gimmick intro: {len(gimmick_picks)} image(s), "
+                f"{gimmick_duration:.2f}s total "
                 f"({gimmick_frames_list[0]}→{gimmick_frames_list[-1]} "
                 f"frame(s) per image = {speed_start:.0f}→{speed_end:.0f} pics/sec); "
-                f"{n} decelerating clicks ending on {click_target}; "
+                f"{len(click_starts)} decelerating clicks ending on {click_target}; "
                 f"music starts after gimmick"
                 + (" + half of title" if title_label else ""))
     s_clamped = max(0.0, min(1.0, kb_strength))
@@ -1989,7 +2044,7 @@ def run(*, folder, num_images=20, aspect="16:9",
 
         terms = [
             _click_term(boundaries[i], boundaries[i + 1])
-            for i in range(n)
+            for i in range(len(click_starts))
         ]
         click_expr = "+".join(terms) if terms else "0"
         filter_complex_parts.append(
@@ -2330,7 +2385,7 @@ def run(*, folder, num_images=20, aspect="16:9",
     try:
         if gimmick:
             ctx.log("Rendering gimmick intro...")
-            for i, path in enumerate(picks):
+            for i, path in enumerate(gimmick_picks):
                 if ctx.cancelled():
                     break
                 frame = _gimmick_frame(path, out_w, out_h)
