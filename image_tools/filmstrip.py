@@ -198,7 +198,7 @@ def _render_filmstrip(pool, num_columns, bg_color, output, ctx, crop=True):
 
 
 def run(*, folder, num_columns=2, repetitions=1, allow_repeat=False,
-        crop=True, bg=None, output=None, ctx=None):
+        crop=True, bg=None, output=None, seed=None, ctx=None):
     """Build one or more 9:16 film-strip collages.
 
     folder        absolute path with source images
@@ -219,6 +219,8 @@ def run(*, folder, num_columns=2, repetitions=1, allow_repeat=False,
     """
     if ctx is None:
         ctx = RunContext()
+    if seed is not None:
+        random.seed(seed)
     if num_columns < 1:
         raise ValueError("Number of columns must be at least 1.")
     if repetitions < 1:

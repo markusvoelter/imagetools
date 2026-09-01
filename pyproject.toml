@@ -1,0 +1,17 @@
+[tool.pytest.ini_options]
+# Repo root is on sys.path so `import image_tools` resolves without an install.
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-ra --cov=image_tools --cov-report=term-missing"
+markers = [
+    "slow: end-to-end tests that render real video/images (deselect with -m 'not slow')",
+    "ffmpeg: requires the ffmpeg/ffprobe binaries on PATH",
+    "librosa: requires the optional librosa audio dependency",
+]
+
+[tool.coverage.run]
+source = ["image_tools"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true

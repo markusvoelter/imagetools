@@ -1,6 +1,7 @@
 """Cut a horizontal panorama into Instagram carousel slides (JPEG files)."""
 
 import os
+import random
 from datetime import datetime, timedelta
 
 import piexif
@@ -93,7 +94,7 @@ def _build_one_set(folder, num_slides, aspect_ratio, output_dir,
 
 
 def run(*, folder, num_slides=20, aspect_ratio="9:16",
-        output_dir=None, random_order=False, num_sets=1, ctx=None):
+        output_dir=None, random_order=False, num_sets=1, seed=None, ctx=None):
     """Build the carousel.
 
     folder        absolute path with source images
@@ -111,6 +112,8 @@ def run(*, folder, num_slides=20, aspect_ratio="9:16",
     """
     if ctx is None:
         ctx = RunContext()
+    if seed is not None:
+        random.seed(seed)
 
     folder = os.path.abspath(folder)
     if not os.path.isdir(folder):

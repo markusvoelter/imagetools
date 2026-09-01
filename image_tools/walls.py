@@ -101,7 +101,8 @@ def collect_files(folder, exts):
     return sorted(set(files))
 
 
-def run(*, wall_folder, image_folder, num_outputs, output_dir=None, ctx=None):
+def run(*, wall_folder, image_folder, num_outputs, output_dir=None, seed=None,
+        ctx=None):
     """Generate `num_outputs` composites.
 
     wall_folder    folder of wall scaffold images (PNG/JPG)
@@ -113,6 +114,8 @@ def run(*, wall_folder, image_folder, num_outputs, output_dir=None, ctx=None):
     """
     if ctx is None:
         ctx = RunContext()
+    if seed is not None:
+        random.seed(seed)
 
     wall_folder = os.path.abspath(wall_folder)
     image_folder = os.path.abspath(image_folder)

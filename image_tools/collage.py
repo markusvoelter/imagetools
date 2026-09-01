@@ -953,7 +953,7 @@ def auto_output_filename(folder, style, num_images, num_cols=None,
 
 
 def run(*, folder, style="creative", output=None, num_cols=None,
-        aspect="16:9", count=None, bg=None, seq=None, ctx=None):
+        aspect="16:9", count=None, bg=None, seq=None, seed=None, ctx=None):
     """Generate a collage. Pure-Python; logs via ctx.log.
 
     folder        absolute path to folder containing .jpg images
@@ -963,10 +963,14 @@ def run(*, folder, style="creative", output=None, num_cols=None,
     aspect        "W:H" (mosaic style only)
     count         integer (mosaic style only)
     bg            hex string like "#333333"
+    seed          optional int; seeds the RNG so the (otherwise randomised)
+                  layout is reproducible. Mainly for tests.
     ctx           RunContext
     """
     if ctx is None:
         ctx = RunContext()
+    if seed is not None:
+        random.seed(seed)
     if style not in STYLES:
         raise ValueError(f"Unknown style: {style}. Choose from {STYLES}.")
 

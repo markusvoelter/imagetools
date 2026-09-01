@@ -1,0 +1,6 @@
+# Extra dependencies for running the test suite.
+# Install with:  .venv/bin/python -m pip install -r requirements-dev.txt
+-r requirements.txt
+
+pytest
+pytest-cov

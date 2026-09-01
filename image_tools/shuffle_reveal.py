@@ -155,7 +155,8 @@ def run(*, folder, aspect_ratio="9:16", direction=DIRECTION_HORIZONTAL,
         output=None, hold_s=DEFAULT_HOLD_S,
         min_intermediate=DEFAULT_MIN_INTERMEDIATE,
         max_intermediate=DEFAULT_MAX_INTERMEDIATE,
-        num_images=0, random_order=False, reverse=False, music=None, ctx=None):
+        num_images=0, random_order=False, reverse=False, music=None,
+        seed=None, ctx=None):
     """Render the shuffle-reveal video using images from `folder`.
 
     folder            folder with source images
@@ -178,6 +179,8 @@ def run(*, folder, aspect_ratio="9:16", direction=DIRECTION_HORIZONTAL,
     """
     if ctx is None:
         ctx = RunContext()
+    if seed is not None:
+        random.seed(seed)
     if direction not in DIRECTIONS:
         raise ValueError(f"Unknown direction: {direction}")
     if aspect_ratio not in ASPECT_RATIOS:
