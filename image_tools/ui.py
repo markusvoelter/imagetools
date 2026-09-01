@@ -1316,6 +1316,11 @@ class ShuffleRevealTab(RunnerTab):
             kw["music"] = self.music.get().strip()
         if self.output.get().strip():
             kw["output"] = self.output.get().strip()
+        else:
+            # Default: store the result in the input images folder, named after
+            # the project (e.g. "<project> fast scroll.mp4").
+            kw["output"] = os.path.join(
+                folder, f"{_store.current_project} fast scroll.mp4")
         return kw
 
 

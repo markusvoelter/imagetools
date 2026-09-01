@@ -8,6 +8,7 @@ image or video is ever produced.
 """
 
 import json
+import os
 
 import pytest
 
@@ -327,6 +328,33 @@ def test_on_stop_cancels(root, fresh_store, monkeypatch):
     tab.ctx = RunContext()
     tab._on_stop()
     assert tab.ctx.cancelled()
+
+
+# --------------------------------------------------------------------------
+#  Fast Scroll output defaults into the input folder, named per project
+# --------------------------------------------------------------------------
+
+def test_shuffle_output_defaults_into_input_folder(root, fresh_store, tmp_path,
+                                                   monkeypatch):
+    monkeypatch.setattr(ui, "_current_image_folder", lambda: str(tmp_path))
+    fresh_store.clone_project("Holiday 2026")  # becomes the current project
+    tab = ui.ShuffleRevealTab(root)
+
+    kw = tab._gather_kwargs()
+
+    assert kw["output"] == os.path.join(
+        str(tmp_path), "Holiday 2026 fast scroll.mp4")
+
+
+def test_shuffle_output_respects_explicit_override(root, fresh_store, tmp_path,
+                                                   monkeypatch):
+    monkeypatch.setattr(ui, "_current_image_folder", lambda: str(tmp_path))
+    tab = ui.ShuffleRevealTab(root)
+    tab.output.set("/somewhere/else.mp4")
+
+    kw = tab._gather_kwargs()
+
+    assert kw["output"] == "/somewhere/else.mp4"
 
 
 # --------------------------------------------------------------------------
