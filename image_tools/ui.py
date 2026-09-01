@@ -9,6 +9,7 @@ import sys
 import threading
 import tkinter as tk
 import traceback
+from datetime import datetime
 from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 
@@ -389,6 +390,22 @@ class RunnerTab(ttk.Frame):
 
     persist_prefix = None  # subclasses override
 
+    # Every tab stores its result in the selected images folder, named
+    # "<project> <output_label> <timestamp>". `output_ext` is the file
+    # extension for single-file outputs, or None for tools that write a
+    # directory of files.
+    output_label = None
+    output_ext = None
+
+    def _default_output(self, folder):
+        """Default output path inside the input `folder`, named after the
+        current project, this tool, and a timestamp."""
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        name = f"{_store.current_project} {self.output_label} {ts}"
+        if self.output_ext:
+            name += self.output_ext
+        return os.path.join(folder, name)
+
     def __init__(self, master, run_fn, default_input_dir=None):
         super().__init__(master, padding=10)
         self.run_fn = run_fn
@@ -560,6 +577,8 @@ class RunnerTab(ttk.Frame):
 
 class CollageTab(RunnerTab):
     persist_prefix = "collage"
+    output_label = "collage"
+    output_ext = ".jpg"
 
     def __init__(self, master):
         super().__init__(master, collage_mod.run,
@@ -644,6 +663,8 @@ class CollageTab(RunnerTab):
         }
         if self.output.get().strip():
             kw["output"] = self.output.get().strip()
+        else:
+            kw["output"] = self._default_output(folder)
         if self.num_cols.get().strip():
             try:
                 kw["num_cols"] = int(self.num_cols.get())
@@ -700,6 +721,8 @@ class CollageTab(RunnerTab):
 
 class FilmstripTab(RunnerTab):
     persist_prefix = "filmstrip"
+    output_label = "film strip"
+    output_ext = ".jpg"
 
     def __init__(self, master):
         super().__init__(master, filmstrip_mod.run,
@@ -793,6 +816,8 @@ class FilmstripTab(RunnerTab):
             kw["bg"] = self.bg.get().strip()
         if self.output.get().strip():
             kw["output"] = self.output.get().strip()
+        else:
+            kw["output"] = self._default_output(folder)
         return kw
 
 
@@ -802,6 +827,8 @@ class FilmstripTab(RunnerTab):
 
 class RotateVideoTab(RunnerTab):
     persist_prefix = "rotate_video"
+    output_label = "rotate video"
+    output_ext = ".mp4"
 
     def __init__(self, master):
         super().__init__(master, rotate_video_mod.run,
@@ -920,6 +947,8 @@ class RotateVideoTab(RunnerTab):
         }
         if self.output.get().strip():
             kw["output"] = self.output.get().strip()
+        else:
+            kw["output"] = self._default_output(folder)
         if self.music.get().strip():
             kw["music"] = self.music.get().strip()
         return kw
@@ -931,6 +960,7 @@ class RotateVideoTab(RunnerTab):
 
 class CarouselTab(RunnerTab):
     persist_prefix = "carousel"
+    output_label = "carousel"  # directory of slides (no extension)
 
     def __init__(self, master):
         super().__init__(master, carousel_mod.run,
@@ -1008,6 +1038,8 @@ class CarouselTab(RunnerTab):
         }
         if self.output_dir.get().strip():
             kw["output_dir"] = self.output_dir.get().strip()
+        else:
+            kw["output_dir"] = self._default_output(folder)
         return kw
 
 
@@ -1017,6 +1049,8 @@ class CarouselTab(RunnerTab):
 
 class ScrollVideoTab(RunnerTab):
     persist_prefix = "scroll_video"
+    output_label = "scroll video"
+    output_ext = ".mp4"
 
     def __init__(self, master):
         super().__init__(master, scroll_video_mod.run,
@@ -1143,6 +1177,8 @@ class ScrollVideoTab(RunnerTab):
             kw["end_screen"] = end_screen
         if self.output.get().strip():
             kw["output"] = self.output.get().strip()
+        else:
+            kw["output"] = self._default_output(folder)
         return kw
 
 
@@ -1152,6 +1188,8 @@ class ScrollVideoTab(RunnerTab):
 
 class ShuffleRevealTab(RunnerTab):
     persist_prefix = "shuffle_reveal"
+    output_label = "fast scroll"
+    output_ext = ".mp4"
 
     def __init__(self, master):
         super().__init__(master, shuffle_reveal_mod.run,
@@ -1317,10 +1355,7 @@ class ShuffleRevealTab(RunnerTab):
         if self.output.get().strip():
             kw["output"] = self.output.get().strip()
         else:
-            # Default: store the result in the input images folder, named after
-            # the project (e.g. "<project> fast scroll.mp4").
-            kw["output"] = os.path.join(
-                folder, f"{_store.current_project} fast scroll.mp4")
+            kw["output"] = self._default_output(folder)
         return kw
 
 
@@ -1330,6 +1365,8 @@ class ShuffleRevealTab(RunnerTab):
 
 class ReelTab(RunnerTab):
     persist_prefix = "reel"
+    output_label = "reel"
+    output_ext = ".mp4"
 
     def __init__(self, master):
         super().__init__(master, reel_mod.run,
@@ -1423,6 +1460,8 @@ class ReelTab(RunnerTab):
                 raise ValueError(f"Interval must be a number.")
         if self.output.get().strip():
             kw["output"] = self.output.get().strip()
+        else:
+            kw["output"] = self._default_output(folder)
         if self.bg.get().strip():
             kw["bg"] = self.bg.get().strip()
         if self.music_folder.get().strip():
@@ -1449,6 +1488,7 @@ class ReelTab(RunnerTab):
 
 class WallsTab(RunnerTab):
     persist_prefix = "walls"
+    output_label = "walls"  # directory of composites (no extension)
 
     def __init__(self, master):
         super().__init__(master, walls_mod.run,
@@ -1507,6 +1547,8 @@ class WallsTab(RunnerTab):
         }
         if self.output_dir.get().strip():
             kw["output_dir"] = self.output_dir.get().strip()
+        else:
+            kw["output_dir"] = self._default_output(image_folder)
         return kw
 
 
@@ -1516,6 +1558,7 @@ class WallsTab(RunnerTab):
 
 class SplitTab(RunnerTab):
     persist_prefix = "split"
+    output_label = "split"  # parent directory of per-image slide folders
 
     def __init__(self, master):
         super().__init__(master, split_mod.run,
@@ -1568,6 +1611,8 @@ class SplitTab(RunnerTab):
         }
         if self.output_dir.get().strip():
             kw["output_dir"] = self.output_dir.get().strip()
+        else:
+            kw["output_dir"] = self._default_output(folder)
         if self.bg.get().strip():
             kw["bg"] = self.bg.get().strip()
         return kw
@@ -1579,6 +1624,8 @@ class SplitTab(RunnerTab):
 
 class KenBurnsTab(RunnerTab):
     persist_prefix = "ken_burns"
+    output_label = "ken burns"
+    output_ext = ".mp4"
 
     def __init__(self, master):
         super().__init__(master, ken_burns_mod.run,
@@ -1859,6 +1906,7 @@ class KenBurnsTab(RunnerTab):
         if text_lines:
             kw["text_slides"] = text_lines
         kw["project_name"] = _store.current_project
+        kw["output"] = self._default_output(folder)
         return kw
 
 

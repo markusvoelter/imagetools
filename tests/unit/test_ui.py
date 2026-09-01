@@ -331,30 +331,63 @@ def test_on_stop_cancels(root, fresh_store, monkeypatch):
 
 
 # --------------------------------------------------------------------------
-#  Fast Scroll output defaults into the input folder, named per project
+#  Default outputs land in the input folder, named "<project> <tool> <ts>"
 # --------------------------------------------------------------------------
+
+import re
+
+
+def _assert_default_output(path, folder, project, label, ext):
+    assert os.path.dirname(path) == str(folder)
+    pat = rf"{re.escape(project)} {re.escape(label)} \d{{8}}_\d{{6}}{re.escape(ext)}"
+    assert re.fullmatch(pat, os.path.basename(path)), path
+
+
+def test_default_output_helper_names_by_project_tool_and_timestamp(
+        root, fresh_store, tmp_path, monkeypatch):
+    monkeypatch.setattr(ui, "_current_image_folder", lambda: str(tmp_path))
+    fresh_store.clone_project("Holiday 2026")
+    tab = ui.ShuffleRevealTab(root)
+    _assert_default_output(tab._default_output(str(tmp_path)),
+                           tmp_path, "Holiday 2026", "fast scroll", ".mp4")
+
 
 def test_shuffle_output_defaults_into_input_folder(root, fresh_store, tmp_path,
                                                    monkeypatch):
     monkeypatch.setattr(ui, "_current_image_folder", lambda: str(tmp_path))
-    fresh_store.clone_project("Holiday 2026")  # becomes the current project
+    fresh_store.clone_project("Holiday 2026")
     tab = ui.ShuffleRevealTab(root)
-
-    kw = tab._gather_kwargs()
-
-    assert kw["output"] == os.path.join(
-        str(tmp_path), "Holiday 2026 fast scroll.mp4")
+    _assert_default_output(tab._gather_kwargs()["output"],
+                           tmp_path, "Holiday 2026", "fast scroll", ".mp4")
 
 
-def test_shuffle_output_respects_explicit_override(root, fresh_store, tmp_path,
+def test_collage_output_defaults_into_input_folder(root, fresh_store, tmp_path,
                                                    monkeypatch):
+    monkeypatch.setattr(ui, "_current_image_folder", lambda: str(tmp_path))
+    fresh_store.clone_project("Trip")
+    tab = ui.CollageTab(root)
+    tab.style.set("grid")
+    tab.repetitions.set("1")
+    _assert_default_output(tab._gather_kwargs()["output"],
+                           tmp_path, "Trip", "collage", ".jpg")
+
+
+def test_split_output_dir_defaults_into_input_folder(root, fresh_store,
+                                                     tmp_path, monkeypatch):
+    monkeypatch.setattr(ui, "_current_image_folder", lambda: str(tmp_path))
+    fresh_store.clone_project("Trip")
+    tab = ui.SplitTab(root)
+    # Directory output: same naming, no extension.
+    _assert_default_output(tab._gather_kwargs()["output_dir"],
+                           tmp_path, "Trip", "split", "")
+
+
+def test_output_respects_explicit_override(root, fresh_store, tmp_path,
+                                           monkeypatch):
     monkeypatch.setattr(ui, "_current_image_folder", lambda: str(tmp_path))
     tab = ui.ShuffleRevealTab(root)
     tab.output.set("/somewhere/else.mp4")
-
-    kw = tab._gather_kwargs()
-
-    assert kw["output"] == "/somewhere/else.mp4"
+    assert tab._gather_kwargs()["output"] == "/somewhere/else.mp4"
 
 
 # --------------------------------------------------------------------------

@@ -1469,7 +1469,7 @@ def run(*, folder, num_images=20, aspect="16:9",
         music=None, gimmick=False, end_screen=None,
         title=None, subtitle=None, text_slides=None,
         title_font=None, subtitle_font=None, text_slide_font=None,
-        title_screen=None, project_name=None,
+        title_screen=None, project_name=None, output=None,
         random_order=True, start_at_crop=False, debug=False, ctx=None):
     """Render the Ken Burns video.
 
@@ -1693,12 +1693,15 @@ def run(*, folder, num_images=20, aspect="16:9",
         })
     total_slides = len(slides_seq)
 
-    if project_name and project_name.strip():
-        stem = project_name.strip()
+    if output:
+        output = os.path.abspath(output)
     else:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        stem = f"kenburns_{aspect.replace(':', 'x')}_{ts}"
-    output = os.path.join(folder, f"{stem}.mp4")
+        if project_name and project_name.strip():
+            stem = project_name.strip()
+        else:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            stem = f"kenburns_{aspect.replace(':', 'x')}_{ts}"
+        output = os.path.join(folder, f"{stem}.mp4")
     os.makedirs(os.path.dirname(output), exist_ok=True)
 
     # If a sidecar JSON supplied bar timings, each image slide carries its
