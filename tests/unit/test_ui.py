@@ -330,6 +330,182 @@ def test_on_stop_cancels(root, fresh_store, monkeypatch):
 
 
 # --------------------------------------------------------------------------
+#  Changing the images folder forces creation of a new, named project
+# --------------------------------------------------------------------------
+
+def test_change_images_folder_creates_named_project(root, fresh_store, tmp_path,
+                                                    monkeypatch):
+    target = tmp_path / "shoot"
+    target.mkdir()
+    monkeypatch.setattr(ui.filedialog, "askdirectory", lambda **k: str(target))
+    monkeypatch.setattr(ui.simpledialog, "askstring", lambda *a, **k: "My Shoot")
+
+    name = ui._change_images_folder(root)
+
+    assert name == "My Shoot"
+    assert fresh_store.current_project == "My Shoot"
+    assert "My Shoot" in fresh_store.list_projects()
+    assert ui._current_image_folder() == str(target)
+
+
+def test_change_images_folder_cancel_directory_is_noop(root, fresh_store,
+                                                       monkeypatch):
+    before = list(fresh_store.list_projects())
+    monkeypatch.setattr(ui.filedialog, "askdirectory", lambda **k: "")
+    monkeypatch.setattr(ui.simpledialog, "askstring",
+                        lambda *a, **k: pytest.fail("must not prompt for a name"))
+
+    assert ui._change_images_folder(root) is None
+    assert fresh_store.list_projects() == before
+    assert ui._current_image_folder() == ""
+
+
+def test_change_images_folder_cancel_name_leaves_project_unchanged(
+        root, fresh_store, tmp_path, monkeypatch):
+    target = tmp_path / "shoot"
+    target.mkdir()
+    before = list(fresh_store.list_projects())
+    monkeypatch.setattr(ui.filedialog, "askdirectory", lambda **k: str(target))
+    monkeypatch.setattr(ui.simpledialog, "askstring", lambda *a, **k: None)
+
+    assert ui._change_images_folder(root) is None
+    assert fresh_store.list_projects() == before
+    assert fresh_store.current_project == before[0]
+    assert ui._current_image_folder() == ""
+
+
+# --------------------------------------------------------------------------
+#  Background image-folder watcher
+# --------------------------------------------------------------------------
+
+def test_folder_status_empty():
+    assert ui._folder_status("") == ("empty", "")
+
+
+def test_folder_status_missing(tmp_path):
+    state, detail = ui._folder_status(str(tmp_path / "gone"))
+    assert state == "missing"
+
+
+def test_folder_status_no_images(tmp_path):
+    (tmp_path / "notes.txt").write_text("x")
+    state, detail = ui._folder_status(str(tmp_path))
+    assert state == "no_images"
+
+
+def test_folder_status_ok_counts_images(image_folder):
+    folder = image_folder([(10, 10), (10, 10), (10, 10)])
+    (folder / "readme.txt").write_text("ignore me")
+    state, count = ui._folder_status(str(folder))
+    assert state == "ok"
+    assert count == 3
+
+
+def test_folder_status_various_extensions(tmp_path, make_image):
+    make_image(10, 10).save(tmp_path / "a.png")
+    make_image(10, 10).save(tmp_path / "b.webp")
+    state, count = ui._folder_status(str(tmp_path))
+    assert state == "ok"
+    assert count == 2
+
+
+def _make_watcher(root, folder_var, interval_ms=10_000):
+    import tkinter as tk
+    label = ui.ttk.Label(root)
+    watcher = ui._FolderWatcher(root, folder_var, label, interval_ms=interval_ms)
+    return watcher, label
+
+
+def test_watcher_initial_ok_state(root, image_folder):
+    import tkinter as tk
+    folder = image_folder([(10, 10)])
+    var = tk.StringVar(value=str(folder))
+    watcher, label = _make_watcher(root, var)
+    try:
+        assert "✓" in label.cget("text")
+        assert str(label.cget("foreground")) == "#4caf50"
+    finally:
+        watcher.stop()
+
+
+def test_watcher_flags_missing_folder(root, tmp_path):
+    import tkinter as tk
+    var = tk.StringVar(value=str(tmp_path / "nope"))
+    watcher, label = _make_watcher(root, var)
+    try:
+        assert "⚠" in label.cget("text")
+        assert str(label.cget("foreground")) == "#e05252"
+    finally:
+        watcher.stop()
+
+
+def test_watcher_flags_empty_folder(root, tmp_path):
+    import tkinter as tk
+    var = tk.StringVar(value=str(tmp_path))
+    watcher, label = _make_watcher(root, var)
+    try:
+        assert "⚠" in label.cget("text")
+        assert "no images" in label.cget("text")
+    finally:
+        watcher.stop()
+
+
+def test_watcher_blank_selection_clears_label(root):
+    import tkinter as tk
+    var = tk.StringVar(value="")
+    watcher, label = _make_watcher(root, var)
+    try:
+        assert label.cget("text") == ""
+    finally:
+        watcher.stop()
+
+
+def test_watcher_drain_applies_queued_status(root, tmp_path):
+    """The Tk-thread drain renders whatever the worker most recently posted."""
+    import tkinter as tk
+    var = tk.StringVar(value=str(tmp_path))
+    watcher, label = _make_watcher(root, var)
+    try:
+        # Simulate the worker posting a fresh 'missing' result, then draining.
+        watcher._queue.put(("missing", "folder not found"))
+        watcher._drain()
+        assert "folder not found" in label.cget("text")
+    finally:
+        watcher.stop()
+
+
+def test_watcher_reacts_to_folder_change(root, image_folder, tmp_path):
+    """Changing the folder var re-checks and updates the flag within ~2s."""
+    import time
+    import tkinter as tk
+    good = image_folder([(10, 10)])
+    var = tk.StringVar(value=str(good))
+    watcher, label = _make_watcher(root, var, interval_ms=10_000)
+    try:
+        assert "✓" in label.cget("text")
+        # Point at a non-existent folder; the write-trace wakes the worker.
+        var.set(str(tmp_path / "vanished"))
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            root.update()  # process pending 'after' drains
+            if "⚠" in label.cget("text"):
+                break
+            time.sleep(0.02)
+        assert "⚠" in label.cget("text")
+    finally:
+        watcher.stop()
+
+
+def test_watcher_stop_is_idempotent(root, tmp_path):
+    import tkinter as tk
+    var = tk.StringVar(value=str(tmp_path))
+    watcher, _ = _make_watcher(root, var)
+    watcher.stop()
+    watcher.stop()  # second call must not raise
+    assert watcher._stop.is_set()
+
+
+# --------------------------------------------------------------------------
 #  main() — build the whole window, but never actually enter the event loop
 # --------------------------------------------------------------------------
 

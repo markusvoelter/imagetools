@@ -263,6 +263,119 @@ def _current_image_folder():
 
 
 # ---------------------------------------------------------------------------
+# Background image-folder watcher
+# ---------------------------------------------------------------------------
+
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
+_FOLDER_CHECK_INTERVAL_MS = 2000
+
+
+def _folder_status(path):
+    """Classify the selected image folder without raising.
+
+    Returns a `(state, detail)` tuple where state is one of:
+      "empty"      nothing selected yet          (detail "")
+      "ok"         folder exists and has images  (detail = image count, int)
+      "missing"    path is gone or unreadable    (detail = message)
+      "no_images"  folder exists but is empty    (detail = message)
+    """
+    if not path:
+        return ("empty", "")
+    if not os.path.isdir(path):
+        return ("missing", "folder not found")
+    count = 0
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                try:
+                    is_file = entry.is_file()
+                except OSError:
+                    is_file = False
+                if (is_file and os.path.splitext(entry.name)[1].lower()
+                        in _IMAGE_EXTENSIONS):
+                    count += 1
+    except OSError:
+        return ("missing", "folder not readable")
+    if count == 0:
+        return ("no_images", "no images in folder")
+    return ("ok", count)
+
+
+class _FolderWatcher:
+    """Periodically check the selected image folder and flag problems.
+
+    The filesystem scan runs on a daemon thread so a slow or disconnected
+    network folder never freezes the UI; results are marshalled back to the Tk
+    thread through a queue and rendered into `label` (green tick when images
+    are present, red warning when the folder has vanished or is empty). A
+    change to `folder_var` wakes the worker for a prompt re-check.
+    """
+
+    def __init__(self, root, folder_var, label,
+                 interval_ms=_FOLDER_CHECK_INTERVAL_MS):
+        self.root = root
+        self.folder_var = folder_var
+        self.label = label
+        self.interval_ms = interval_ms
+        self._path = folder_var.get().strip()
+        self._queue = queue.Queue()
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        folder_var.trace_add("write", self._on_var_change)
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+        self.check_now()  # render an initial status synchronously
+        self.root.after(self.interval_ms, self._poll)
+
+    def _on_var_change(self, *_a):
+        # Runs on the Tk thread; hand the new path to the worker and nudge it.
+        self._path = self.folder_var.get().strip()
+        self._wake.set()
+        if not self._stop.is_set():
+            self.root.after(150, self._drain)
+
+    def _worker(self):
+        while not self._stop.is_set():
+            self._queue.put(_folder_status(self._path))
+            # Wake early when the selection changed; else poll on the interval.
+            self._wake.wait(self.interval_ms / 1000.0)
+            self._wake.clear()
+
+    def _poll(self):
+        self._drain()
+        if not self._stop.is_set():
+            self.root.after(self.interval_ms, self._poll)
+
+    def _drain(self):
+        """Apply the most recent status posted by the worker (Tk thread)."""
+        latest = None
+        try:
+            while True:
+                latest = self._queue.get_nowait()
+        except queue.Empty:
+            pass
+        if latest is not None:
+            self._apply(*latest)
+
+    def check_now(self):
+        """Scan and render synchronously (initial state; also used in tests)."""
+        self._apply(*_folder_status(self.folder_var.get().strip()))
+
+    def _apply(self, state, detail):
+        if state == "ok":
+            self.label.config(text=f"✓ {detail} image(s)",
+                              foreground="#4caf50")
+        elif state == "empty":
+            self.label.config(text="", foreground="")
+        else:  # "missing" or "no_images"
+            self.label.config(text=f"⚠ {detail}", foreground="#e05252")
+
+    def stop(self):
+        self._stop.set()
+        self._wake.set()
+
+
+# ---------------------------------------------------------------------------
 # Base tab
 # ---------------------------------------------------------------------------
 
@@ -1774,6 +1887,35 @@ def _prompt_project_name(parent, title, prompt, initial=""):
         return name
 
 
+def _change_images_folder(root):
+    """Pick a new images folder; changing it always creates a new project.
+
+    The user is prompted (and forced) to name the new project. On confirm, the
+    current project's settings are cloned into the new project, which then owns
+    the chosen folder. Returns the new project name, or None if the user
+    cancelled either dialog (in which case the folder is left unchanged).
+    """
+    folder_var = _make_global_folder_var()
+    path = filedialog.askdirectory(initialdir=folder_var.get() or PROJECT_ROOT)
+    if not path:
+        return None
+    suggested = os.path.basename(os.path.normpath(path))
+    name = _prompt_project_name(
+        root, "New project",
+        "Changing the images folder creates a new project.\n"
+        "Enter a name for the new project:",
+        initial=suggested)
+    if name is None:
+        return None  # cancelled — leave the current folder/project unchanged
+    try:
+        _store.clone_project(name)
+    except ValueError as e:
+        messagebox.showerror("New project", str(e), parent=root)
+        return None
+    folder_var.set(path)
+    return name
+
+
 def _build_project_bar(root):
     outer = ttk.Frame(root, padding=(8, 6, 8, 0))
     outer.pack(fill="x")
@@ -1838,16 +1980,26 @@ def _build_project_bar(root):
     ttk.Button(top, text="Delete", command=on_delete).pack(side="left",
                                                             padx=(6, 0))
 
-    # Row 2: shared image folder for the current project.
+    # Row 2: shared image folder for the current project. Changing the folder
+    # always creates a new (user-named) project, so each image directory maps
+    # to its own project.
     folder_var = _make_global_folder_var()
     row2 = ttk.Frame(outer)
     row2.pack(fill="x", pady=(6, 0))
     ttk.Label(row2, text="Images").pack(side="left")
-    entry = ttk.Entry(row2, textvariable=folder_var)
+    # Read-only so the only way to change the folder is via Browse..., which
+    # routes through the forced new-project flow.
+    entry = ttk.Entry(row2, textvariable=folder_var, state="readonly")
     entry.pack(side="left", fill="x", expand=True, padx=(6, 6))
     ttk.Button(row2, text="Browse...",
-               command=lambda: pick_dir(folder_var, PROJECT_ROOT)
+               command=lambda: _change_images_folder(root)
                ).pack(side="left")
+
+    # Status flag: a background watcher warns (in red) if the folder vanishes
+    # or holds no images. Kept on `root` so it isn't garbage-collected.
+    folder_status = ttk.Label(row2, text="")
+    folder_status.pack(side="left", padx=(8, 0))
+    root._folder_watcher = _FolderWatcher(root, folder_var, folder_status)
 
 
 def main():
