@@ -137,7 +137,8 @@ def _resolve_audio_track(music_path, ctx):
                     f"passing the file to ffmpeg anyway.")
         return music_path
     if not os.path.isdir(music_path):
-        raise ValueError(f"Music path not a file or folder: {music_path}")
+        ctx.log(f"Music path not found: {music_path}; video will be silent.")
+        return None
     audio_files = []
     for ext in AUDIO_EXTENSIONS:
         audio_files.extend(Path(music_path).glob(f"*{ext}"))

@@ -44,6 +44,9 @@ def test_folder_without_audio_returns_none(mod, tmp_path, capture_ctx):
     assert any("no audio files" in line.lower() for line in capture_ctx.logs)
 
 
-def test_missing_path_raises(mod, tmp_path, capture_ctx):
-    with pytest.raises(ValueError, match="not a file or folder"):
-        mod._resolve_audio_track(str(tmp_path / "nope.mp3"), capture_ctx)
+def test_missing_path_returns_none_without_crashing(mod, tmp_path, capture_ctx):
+    # A configured-but-missing music path must not abort the render; it is
+    # treated as "no music" (silent) with an explanatory log line.
+    assert mod._resolve_audio_track(str(tmp_path / "nope.mp3"), capture_ctx) \
+        is None
+    assert any("not found" in line.lower() for line in capture_ctx.logs)
