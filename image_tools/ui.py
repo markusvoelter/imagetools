@@ -264,6 +264,95 @@ def _current_image_folder():
 
 
 # ---------------------------------------------------------------------------
+# Other shared, per-project fields shown in the project bar (music, title,
+# subtitle and their fonts). Like the image folder, each is persisted per
+# project and reloaded when the current project changes.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_MUSIC = (
+    "/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music")
+
+_GLOBAL_MUSIC_KEY = "_global.music"
+_GLOBAL_TITLE_KEY = "_global.title"
+_GLOBAL_TITLE_FONT_KEY = "_global.title_font"
+_GLOBAL_SUBTITLE_KEY = "_global.subtitle"
+_GLOBAL_SUBTITLE_FONT_KEY = "_global.subtitle_font"
+
+_global_vars = {}  # key -> tk.StringVar, created lazily by _make_global_var
+
+
+def _make_global_var(key, default=""):
+    """Return a cached, per-project-persisted tk.StringVar for `key`."""
+    if key in _global_vars:
+        return _global_vars[key]
+    stored = _coerce_stored(tk.StringVar, _store.get(key, default), default)
+    var = tk.StringVar(value=stored)
+    var.trace_add("write", lambda *a: _store.set(key, var.get()))
+
+    def _reload():
+        var.set(_coerce_stored(tk.StringVar, _store.get(key, default), default))
+
+    _store.add_listener(_reload)
+    _global_vars[key] = var
+    return var
+
+
+def _current_music():
+    return _make_global_var(_GLOBAL_MUSIC_KEY, _DEFAULT_MUSIC).get().strip()
+
+
+def _current_title():
+    return _make_global_var(_GLOBAL_TITLE_KEY).get().strip()
+
+
+def _current_title_font():
+    return _make_global_var(_GLOBAL_TITLE_FONT_KEY).get().strip()
+
+
+def _current_subtitle():
+    return _make_global_var(_GLOBAL_SUBTITLE_KEY).get().strip()
+
+
+def _current_subtitle_font():
+    return _make_global_var(_GLOBAL_SUBTITLE_FONT_KEY).get().strip()
+
+
+def _pick_music_into(var, parent=None):
+    """Open an audio-file picker, storing the choice in `var`."""
+    current = var.get().strip()
+    if current and os.path.isfile(current):
+        initial_dir = os.path.dirname(current)
+    elif current and os.path.isdir(current):
+        initial_dir = current
+    else:
+        initial_dir = os.path.expanduser("~")
+    path = filedialog.askopenfilename(
+        initialdir=initial_dir,
+        filetypes=[("Audio", "*.mp3 *.m4a *.wav *.flac *.aac *.ogg *.opus"),
+                   ("All files", "*.*")],
+        title="Pick an audio file", parent=parent)
+    if path:
+        var.set(path)
+
+
+def _pick_font_into(var, parent=None):
+    """Open a font-file picker, storing the choice in `var`."""
+    current = var.get().strip()
+    if current and os.path.isfile(current):
+        initial_dir = os.path.dirname(current)
+    elif sys.platform == "darwin":
+        initial_dir = "/System/Library/Fonts"
+    else:
+        initial_dir = os.path.expanduser("~")
+    path = filedialog.askopenfilename(
+        initialdir=initial_dir,
+        filetypes=[("Font files", "*.ttf *.ttc *.otf"), ("All files", "*.*")],
+        title="Pick a font file", parent=parent)
+    if path:
+        var.set(path)
+
+
+# ---------------------------------------------------------------------------
 # Background image-folder watcher
 # ---------------------------------------------------------------------------
 
@@ -837,10 +926,6 @@ class RotateVideoTab(RunnerTab):
     def _build_form(self):
         self.duration = self.pvar("duration", "15")
         self.cover = self.pvar("cover", "")
-        self.music = self.pvar(
-            "music",
-            "/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music",
-        )
         self.output = self.pvar("output", "")
 
         grid = ttk.Frame(self)
@@ -858,19 +943,6 @@ class RotateVideoTab(RunnerTab):
                    ).grid(row=r, column=2)
         r += 1
 
-        ttk.Label(grid, text="Music file or folder (optional)").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.music).grid(row=r, column=1, sticky="ew", padx=4)
-        music_btns = ttk.Frame(grid)
-        music_btns.grid(row=r, column=2, sticky="w")
-        ttk.Button(music_btns, text="File...",
-                   command=self._pick_music_file).pack(side="left")
-        ttk.Button(music_btns, text="Folder...",
-                   command=lambda: pick_dir(
-                       self.music,
-                       self.music.get() or os.path.expanduser("~"))
-                   ).pack(side="left", padx=(4, 0))
-        r += 1
-
         ttk.Label(grid, text="Output file (optional)").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.output).grid(row=r, column=1, sticky="ew", padx=4)
         ttk.Button(grid, text="Save as...", command=self._pick_output
@@ -879,23 +951,6 @@ class RotateVideoTab(RunnerTab):
 
         ttk.Label(grid, text="(cover must be inside the chosen image folder)",
                   foreground="gray").grid(row=r, column=0, columnspan=3, sticky="w")
-
-    def _pick_music_file(self):
-        current = self.music.get().strip()
-        if current and os.path.isfile(current):
-            initial_dir = os.path.dirname(current)
-        elif current and os.path.isdir(current):
-            initial_dir = current
-        else:
-            initial_dir = os.path.expanduser("~")
-        path = filedialog.askopenfilename(
-            initialdir=initial_dir,
-            filetypes=[("Audio", "*.mp3 *.m4a *.wav *.flac *.aac *.ogg *.opus"),
-                       ("All files", "*.*")],
-            title="Pick an audio file",
-        )
-        if path:
-            self.music.set(path)
 
     def _pick_cover(self):
         folder = _current_image_folder()
@@ -949,8 +1004,9 @@ class RotateVideoTab(RunnerTab):
             kw["output"] = self.output.get().strip()
         else:
             kw["output"] = self._default_output(folder)
-        if self.music.get().strip():
-            kw["music"] = self.music.get().strip()
+        music = _current_music()
+        if music:
+            kw["music"] = music
         return kw
 
 
@@ -1062,10 +1118,6 @@ class ScrollVideoTab(RunnerTab):
         self.scroll_mode = self.pvar("scroll_mode", "Continuous pan")
         self.stepped_hold_s = self.pvar("stepped_hold_s", "2.0")
         self.scroll_speed_pct = self.pvar("scroll_speed_pct", "200")
-        self.music = self.pvar(
-            "music",
-            "/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music",
-        )
 
         grid = ttk.Frame(self)
         grid.pack(fill="x")
@@ -1094,19 +1146,6 @@ class ScrollVideoTab(RunnerTab):
                   ).grid(row=r, column=1, sticky="w", padx=4)
         r += 1
 
-        ttk.Label(grid, text="Music file or folder (optional)").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.music).grid(row=r, column=1, sticky="ew", padx=4)
-        music_btns = ttk.Frame(grid)
-        music_btns.grid(row=r, column=2, sticky="w")
-        ttk.Button(music_btns, text="File...",
-                   command=self._pick_music_file).pack(side="left")
-        ttk.Button(music_btns, text="Folder...",
-                   command=lambda: pick_dir(
-                       self.music,
-                       self.music.get() or os.path.expanduser("~"))
-                   ).pack(side="left", padx=(4, 0))
-        r += 1
-
         ttk.Label(grid, text="Output file (optional)").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.output).grid(row=r, column=1, sticky="ew", padx=4)
         ttk.Button(grid, text="Save as...", command=self._pick_output
@@ -1122,23 +1161,6 @@ class ScrollVideoTab(RunnerTab):
         )
         if path:
             self.output.set(path)
-
-    def _pick_music_file(self):
-        current = self.music.get().strip()
-        if current and os.path.isfile(current):
-            initial_dir = os.path.dirname(current)
-        elif current and os.path.isdir(current):
-            initial_dir = current
-        else:
-            initial_dir = os.path.expanduser("~")
-        path = filedialog.askopenfilename(
-            initialdir=initial_dir,
-            filetypes=[("Audio", "*.mp3 *.m4a *.wav *.flac *.aac *.ogg *.opus"),
-                       ("All files", "*.*")],
-            title="Pick an audio file",
-        )
-        if path:
-            self.music.set(path)
 
     def _gather_kwargs(self):
         folder = _current_image_folder()
@@ -1170,8 +1192,9 @@ class ScrollVideoTab(RunnerTab):
             if pct <= 0:
                 raise ValueError("Scroll speed % must be > 0.")
             kw["scroll_speed_pct"] = pct
-        if self.music.get().strip():
-            kw["music"] = self.music.get().strip()
+        music = _current_music()
+        if music:
+            kw["music"] = music
         end_screen = template_for(self.aspect.get(), "end-screen")
         if end_screen:
             kw["end_screen"] = end_screen
@@ -1206,10 +1229,6 @@ class ShuffleRevealTab(RunnerTab):
             "max_intermediate", str(shuffle_reveal_mod.DEFAULT_MAX_INTERMEDIATE))
         self.random_order = self.pvar("random_order", False, tk.BooleanVar)
         self.reverse = self.pvar("reverse", False, tk.BooleanVar)
-        self.music = self.pvar(
-            "music",
-            "/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music",
-        )
         self.output = self.pvar("output", "")
 
         grid = ttk.Frame(self)
@@ -1261,19 +1280,6 @@ class ShuffleRevealTab(RunnerTab):
                         ).grid(row=r, column=0, columnspan=3, sticky="w", pady=2)
         r += 1
 
-        ttk.Label(grid, text="Music file or folder (optional)").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.music).grid(row=r, column=1, sticky="ew", padx=4)
-        music_btns = ttk.Frame(grid)
-        music_btns.grid(row=r, column=2, sticky="w")
-        ttk.Button(music_btns, text="File...",
-                   command=self._pick_music_file).pack(side="left")
-        ttk.Button(music_btns, text="Folder...",
-                   command=lambda: pick_dir(
-                       self.music,
-                       self.music.get() or os.path.expanduser("~"))
-                   ).pack(side="left", padx=(4, 0))
-        r += 1
-
         ttk.Label(grid, text="Output file (optional)").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.output).grid(row=r, column=1, sticky="ew", padx=4)
         ttk.Button(grid, text="Save as...", command=self._pick_output
@@ -1294,23 +1300,6 @@ class ShuffleRevealTab(RunnerTab):
         )
         if path:
             self.output.set(path)
-
-    def _pick_music_file(self):
-        current = self.music.get().strip()
-        if current and os.path.isfile(current):
-            initial_dir = os.path.dirname(current)
-        elif current and os.path.isdir(current):
-            initial_dir = current
-        else:
-            initial_dir = os.path.expanduser("~")
-        path = filedialog.askopenfilename(
-            initialdir=initial_dir,
-            filetypes=[("Audio", "*.mp3 *.m4a *.wav *.flac *.aac *.ogg *.opus"),
-                       ("All files", "*.*")],
-            title="Pick an audio file",
-        )
-        if path:
-            self.music.set(path)
 
     def _gather_kwargs(self):
         folder = _current_image_folder()
@@ -1350,8 +1339,9 @@ class ShuffleRevealTab(RunnerTab):
         kw["max_intermediate"] = max_int
         kw["random_order"] = self.random_order.get()
         kw["reverse"] = self.reverse.get()
-        if self.music.get().strip():
-            kw["music"] = self.music.get().strip()
+        music = _current_music()
+        if music:
+            kw["music"] = music
         if self.output.get().strip():
             kw["output"] = self.output.get().strip()
         else:
@@ -1374,10 +1364,6 @@ class ReelTab(RunnerTab):
 
     def _build_form(self):
         self.interval = self.pvar("interval", "2.0")
-        self.music_folder = self.pvar(
-            "music_folder",
-            "/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music",
-        )
         self.beats_per_transition = self.pvar("beats_per_transition", "4")
         self.output = self.pvar("output", "")
         self.bg = self.pvar("bg", "")
@@ -1389,19 +1375,6 @@ class ReelTab(RunnerTab):
         r = 0
         ttk.Label(grid, text="Interval per image (seconds)").grid(row=r, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.interval, width=10).grid(row=r, column=1, sticky="w", padx=4)
-        r += 1
-
-        ttk.Label(grid, text="Music file or folder (optional)").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.music_folder).grid(row=r, column=1, sticky="ew", padx=4)
-        music_btns = ttk.Frame(grid)
-        music_btns.grid(row=r, column=2, sticky="w")
-        ttk.Button(music_btns, text="File...",
-                   command=self._pick_music_file).pack(side="left")
-        ttk.Button(music_btns, text="Folder...",
-                   command=lambda: pick_dir(
-                       self.music_folder,
-                       self.music_folder.get() or os.path.expanduser("~"))
-                   ).pack(side="left", padx=(4, 0))
         r += 1
 
         ttk.Label(grid, text="Beats per transition (0 = off)").grid(row=r, column=0, sticky="w", pady=2)
@@ -1431,23 +1404,6 @@ class ReelTab(RunnerTab):
         if path:
             self.output.set(path)
 
-    def _pick_music_file(self):
-        current = self.music_folder.get().strip()
-        if current and os.path.isfile(current):
-            initial_dir = os.path.dirname(current)
-        elif current and os.path.isdir(current):
-            initial_dir = current
-        else:
-            initial_dir = os.path.expanduser("~")
-        path = filedialog.askopenfilename(
-            initialdir=initial_dir,
-            filetypes=[("Audio", "*.mp3 *.m4a *.wav *.flac *.aac *.ogg *.opus"),
-                       ("All files", "*.*")],
-            title="Pick an audio file",
-        )
-        if path:
-            self.music_folder.set(path)
-
     def _gather_kwargs(self):
         folder = _current_image_folder()
         if not folder:
@@ -1464,8 +1420,9 @@ class ReelTab(RunnerTab):
             kw["output"] = self._default_output(folder)
         if self.bg.get().strip():
             kw["bg"] = self.bg.get().strip()
-        if self.music_folder.get().strip():
-            kw["music"] = self.music_folder.get().strip()
+        music = _current_music()
+        if music:
+            kw["music"] = music
         # Reels are vertical — resolve the 9:16 end-screen template.
         end_screen = template_for("9:16", "end-screen")
         if end_screen:
@@ -1636,18 +1593,10 @@ class KenBurnsTab(RunnerTab):
         self.aspect = self.pvar("aspect", "16:9")
         self.duration = self.pvar("duration", "4.0")
         self.kb_strength_pct = self.pvar("kb_strength_pct", "50")
-        self.music = self.pvar(
-            "music",
-            "/Users/markusvoelter/Documents/projects/photo.voelter.de/media/ai-music",
-        )
         self.gimmick = self.pvar("gimmick", False, tk.BooleanVar)
         self.random_order = self.pvar("random_order", True, tk.BooleanVar)
         self.start_at_crop = self.pvar("start_at_crop", False, tk.BooleanVar)
         self.debug = self.pvar("debug", False, tk.BooleanVar)
-        self.title = self.pvar("title", "")
-        self.subtitle = self.pvar("subtitle", "")
-        self.title_font = self.pvar("title_font", "")
-        self.subtitle_font = self.pvar("subtitle_font", "")
         self.text_slide_font = self.pvar("text_slide_font", "")
 
         grid = ttk.Frame(self)
@@ -1679,19 +1628,6 @@ class KenBurnsTab(RunnerTab):
                   ).grid(row=r, column=1, sticky="w", padx=4)
         r += 1
 
-        ttk.Label(grid, text="Music file or folder (optional)").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.music).grid(row=r, column=1, sticky="ew", padx=4)
-        music_btns = ttk.Frame(grid)
-        music_btns.grid(row=r, column=2, sticky="w")
-        ttk.Button(music_btns, text="File...",
-                   command=self._pick_music_file).pack(side="left")
-        ttk.Button(music_btns, text="Folder...",
-                   command=lambda: pick_dir(
-                       self.music,
-                       self.music.get() or os.path.expanduser("~"))
-                   ).pack(side="left", padx=(4, 0))
-        r += 1
-
         ttk.Checkbutton(grid,
                         text="Gimmick intro: flip-through of all selected images "
                              "(0.05s each, music fades in)",
@@ -1717,32 +1653,6 @@ class KenBurnsTab(RunnerTab):
                              "rendered video)",
                         variable=self.debug
                         ).grid(row=r, column=0, columnspan=3, sticky="w", pady=2)
-        r += 1
-
-        ttk.Label(grid, text="Title (optional)").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.title).grid(row=r, column=1, sticky="ew", padx=4)
-        r += 1
-
-        ttk.Label(grid, text="Title font (optional)"
-                  ).grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.title_font
-                  ).grid(row=r, column=1, sticky="ew", padx=4)
-        ttk.Button(grid, text="File...",
-                   command=lambda: self._pick_font(self.title_font)
-                   ).grid(row=r, column=2)
-        r += 1
-
-        ttk.Label(grid, text="Subtitle (optional)").grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.subtitle).grid(row=r, column=1, sticky="ew", padx=4)
-        r += 1
-
-        ttk.Label(grid, text="Subtitle font (optional)"
-                  ).grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.subtitle_font
-                  ).grid(row=r, column=1, sticky="ew", padx=4)
-        ttk.Button(grid, text="File...",
-                   command=lambda: self._pick_font(self.subtitle_font)
-                   ).grid(row=r, column=2)
         r += 1
 
         ttk.Label(grid, text="Text slides (one per line)"
@@ -1775,14 +1685,17 @@ class KenBurnsTab(RunnerTab):
                   foreground="gray", wraplength=560, justify="left"
                   ).grid(row=r, column=0, columnspan=3, sticky="w")
 
-        self.music.trace_add("write", lambda *_: self._refresh_duration_state())
+        # The shared music field lives in the project bar; watch it so the
+        # duration hint updates when the music (or project) changes.
+        _make_global_var(_GLOBAL_MUSIC_KEY, _DEFAULT_MUSIC).trace_add(
+            "write", lambda *_: self._refresh_duration_state())
         self._refresh_duration_state()
 
     def _refresh_duration_state(self):
         """If the music path points to a file with a sidecar JSON containing
         bar timestamps, grey out the duration Entry (image durations will
         come from the JSON) and show a hint. Otherwise re-enable it."""
-        music = self.music.get().strip()
+        music = _current_music()
         bars_active = False
         if music and os.path.isfile(music):
             json_path = os.path.splitext(music)[0] + ".json"
@@ -1800,23 +1713,6 @@ class KenBurnsTab(RunnerTab):
         else:
             self.duration_entry.state(["!disabled"])
             self.duration_hint.configure(text="")
-
-    def _pick_music_file(self):
-        current = self.music.get().strip()
-        if current and os.path.isfile(current):
-            initial_dir = os.path.dirname(current)
-        elif current and os.path.isdir(current):
-            initial_dir = current
-        else:
-            initial_dir = os.path.expanduser("~")
-        path = filedialog.askopenfilename(
-            initialdir=initial_dir,
-            filetypes=[("Audio", "*.mp3 *.m4a *.wav *.flac *.aac *.ogg *.opus"),
-                       ("All files", "*.*")],
-            title="Pick an audio file",
-        )
-        if path:
-            self.music.set(path)
 
     def _save_text_slides(self, _event=None):
         value = self.text_slides_widget.get("1.0", "end-1c")
@@ -1878,8 +1774,9 @@ class KenBurnsTab(RunnerTab):
             "start_at_crop": self.start_at_crop.get(),
             "debug": self.debug.get(),
         }
-        if self.music.get().strip():
-            kw["music"] = self.music.get().strip()
+        music = _current_music()
+        if music:
+            kw["music"] = music
         if self.gimmick.get():
             kw["gimmick"] = True
         end_screen = template_for(self.aspect.get(), "end-screen")
@@ -1888,14 +1785,18 @@ class KenBurnsTab(RunnerTab):
         title_screen = template_for(self.aspect.get(), "title-screen")
         if title_screen:
             kw["title_screen"] = title_screen
-        if self.title.get().strip():
-            kw["title"] = self.title.get().strip()
-        if self.subtitle.get().strip():
-            kw["subtitle"] = self.subtitle.get().strip()
-        if self.title_font.get().strip():
-            kw["title_font"] = self.title_font.get().strip()
-        if self.subtitle_font.get().strip():
-            kw["subtitle_font"] = self.subtitle_font.get().strip()
+        title = _current_title()
+        if title:
+            kw["title"] = title
+        subtitle = _current_subtitle()
+        if subtitle:
+            kw["subtitle"] = subtitle
+        title_font = _current_title_font()
+        if title_font:
+            kw["title_font"] = title_font
+        subtitle_font = _current_subtitle_font()
+        if subtitle_font:
+            kw["subtitle_font"] = subtitle_font
         if self.text_slide_font.get().strip():
             kw["text_slide_font"] = self.text_slide_font.get().strip()
         text_lines = [
@@ -2039,7 +1940,7 @@ def _build_project_bar(root):
     folder_var = _make_global_folder_var()
     row2 = ttk.Frame(outer)
     row2.pack(fill="x", pady=(6, 0))
-    ttk.Label(row2, text="Images").pack(side="left")
+    ttk.Label(row2, text="Images", width=8).pack(side="left")
     # Read-only so the only way to change the folder is via Browse..., which
     # routes through the forced new-project flow.
     entry = ttk.Entry(row2, textvariable=folder_var, state="readonly")
@@ -2053,6 +1954,51 @@ def _build_project_bar(root):
     folder_status = ttk.Label(row2, text="")
     folder_status.pack(side="left", padx=(8, 0))
     root._folder_watcher = _FolderWatcher(root, folder_var, folder_status)
+
+    # Row 3: shared music (file or folder) for the current project.
+    music_var = _make_global_var(_GLOBAL_MUSIC_KEY, _DEFAULT_MUSIC)
+    row3 = ttk.Frame(outer)
+    row3.pack(fill="x", pady=(6, 0))
+    ttk.Label(row3, text="Music", width=8).pack(side="left")
+    ttk.Entry(row3, textvariable=music_var).pack(
+        side="left", fill="x", expand=True, padx=(6, 6))
+    ttk.Button(row3, text="File...",
+               command=lambda: _pick_music_into(music_var, root)
+               ).pack(side="left")
+    ttk.Button(row3, text="Folder...",
+               command=lambda: pick_dir(
+                   music_var, music_var.get() or os.path.expanduser("~"))
+               ).pack(side="left", padx=(4, 0))
+
+    # Row 4: shared title text + font for the current project.
+    title_var = _make_global_var(_GLOBAL_TITLE_KEY)
+    title_font_var = _make_global_var(_GLOBAL_TITLE_FONT_KEY)
+    row4 = ttk.Frame(outer)
+    row4.pack(fill="x", pady=(6, 0))
+    ttk.Label(row4, text="Title", width=8).pack(side="left")
+    ttk.Entry(row4, textvariable=title_var).pack(
+        side="left", fill="x", expand=True, padx=(6, 6))
+    ttk.Label(row4, text="Font").pack(side="left")
+    ttk.Entry(row4, textvariable=title_font_var, width=18).pack(
+        side="left", padx=(4, 4))
+    ttk.Button(row4, text="Font...",
+               command=lambda: _pick_font_into(title_font_var, root)
+               ).pack(side="left")
+
+    # Row 5: shared subtitle text + font for the current project.
+    subtitle_var = _make_global_var(_GLOBAL_SUBTITLE_KEY)
+    subtitle_font_var = _make_global_var(_GLOBAL_SUBTITLE_FONT_KEY)
+    row5 = ttk.Frame(outer)
+    row5.pack(fill="x", pady=(6, 0))
+    ttk.Label(row5, text="Subtitle", width=8).pack(side="left")
+    ttk.Entry(row5, textvariable=subtitle_var).pack(
+        side="left", fill="x", expand=True, padx=(6, 6))
+    ttk.Label(row5, text="Font").pack(side="left")
+    ttk.Entry(row5, textvariable=subtitle_font_var, width=18).pack(
+        side="left", padx=(4, 4))
+    ttk.Button(row5, text="Font...",
+               command=lambda: _pick_font_into(subtitle_font_var, root)
+               ).pack(side="left")
 
 
 def main():

@@ -191,6 +191,7 @@ def fresh_store(tmp_path, monkeypatch):
     store = ui._PersistentStore(tmp_path / "ui_state.json")
     monkeypatch.setattr(ui, "_store", store)
     monkeypatch.setattr(ui, "_global_folder_var", None)
+    monkeypatch.setattr(ui, "_global_vars", {})
     return store
 
 
@@ -388,6 +389,43 @@ def test_output_respects_explicit_override(root, fresh_store, tmp_path,
     tab = ui.ShuffleRevealTab(root)
     tab.output.set("/somewhere/else.mp4")
     assert tab._gather_kwargs()["output"] == "/somewhere/else.mp4"
+
+
+# --------------------------------------------------------------------------
+#  Shared project-bar fields (music, title, subtitle, fonts) feed the tabs
+# --------------------------------------------------------------------------
+
+def test_global_music_flows_into_music_tabs(root, fresh_store, tmp_path,
+                                            monkeypatch):
+    monkeypatch.setattr(ui, "_current_image_folder", lambda: str(tmp_path))
+    ui._make_global_var(ui._GLOBAL_MUSIC_KEY, ui._DEFAULT_MUSIC).set(
+        "/music/song.mp3")
+    for tab_cls in (ui.ReelTab, ui.ScrollVideoTab, ui.ShuffleRevealTab,
+                    ui.KenBurnsTab):
+        assert tab_cls(root)._gather_kwargs()["music"] == "/music/song.mp3"
+
+
+def test_global_music_empty_is_omitted(root, fresh_store, tmp_path,
+                                       monkeypatch):
+    monkeypatch.setattr(ui, "_current_image_folder", lambda: str(tmp_path))
+    ui._make_global_var(ui._GLOBAL_MUSIC_KEY, ui._DEFAULT_MUSIC).set("")
+    assert "music" not in ui.ReelTab(root)._gather_kwargs()
+
+
+def test_global_title_subtitle_and_fonts_flow_into_kenburns(
+        root, fresh_store, tmp_path, monkeypatch):
+    monkeypatch.setattr(ui, "_current_image_folder", lambda: str(tmp_path))
+    ui._make_global_var(ui._GLOBAL_TITLE_KEY).set("My Title")
+    ui._make_global_var(ui._GLOBAL_SUBTITLE_KEY).set("My Subtitle")
+    ui._make_global_var(ui._GLOBAL_TITLE_FONT_KEY).set("/fonts/a.ttf")
+    ui._make_global_var(ui._GLOBAL_SUBTITLE_FONT_KEY).set("/fonts/b.ttf")
+
+    kw = ui.KenBurnsTab(root)._gather_kwargs()
+
+    assert kw["title"] == "My Title"
+    assert kw["subtitle"] == "My Subtitle"
+    assert kw["title_font"] == "/fonts/a.ttf"
+    assert kw["subtitle_font"] == "/fonts/b.ttf"
 
 
 # --------------------------------------------------------------------------
