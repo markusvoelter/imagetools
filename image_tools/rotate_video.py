@@ -198,7 +198,7 @@ def build_video(cover, horizontal_images, overlay, endscreen, output_path,
 
 
 def run(*, folder, total_duration_seconds, cover_image, output=None,
-        music=None, ctx=None):
+        music=None, end_screen=None, ctx=None):
     """Build the rotate video.
 
     folder                   absolute path containing horizontal images + cover
@@ -207,6 +207,8 @@ def run(*, folder, total_duration_seconds, cover_image, output=None,
     output                   absolute output .mp4 path; auto in OUTPUT_DIR if None
     music                    either an audio file (used directly) or a folder
                              (random audio file inside is picked)
+    end_screen               path to the closing 9:16 end-screen image; when
+                             None the bundled `assets/endscreen.png` is used
     ctx                      RunContext
     """
     if ctx is None:
@@ -232,8 +234,9 @@ def run(*, folder, total_duration_seconds, cover_image, output=None,
 
     if not os.path.isfile(OVERLAY_PNG):
         raise FileNotFoundError(f"Overlay not found at '{OVERLAY_PNG}'")
-    if not os.path.isfile(ENDSCREEN_PNG):
-        raise FileNotFoundError(f"Endscreen not found at '{ENDSCREEN_PNG}'")
+    endscreen = os.path.abspath(end_screen) if end_screen else ENDSCREEN_PNG
+    if not os.path.isfile(endscreen):
+        raise FileNotFoundError(f"Endscreen not found at '{endscreen}'")
 
     if output is None:
         ensure_output_dir()
@@ -249,6 +252,6 @@ def run(*, folder, total_duration_seconds, cover_image, output=None,
         if audio_track:
             ctx.log(f"Audio track: {audio_track}")
 
-    build_video(cover, horizontal, OVERLAY_PNG, ENDSCREEN_PNG,
+    build_video(cover, horizontal, OVERLAY_PNG, endscreen,
                 output, duration_horizontal, ctx, audio_track=audio_track)
     return output

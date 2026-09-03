@@ -78,6 +78,21 @@ def test_rotate_builds_command(image_folder, make_image, tmp_path, capture_ctx,
     assert cmd[-1] == str(out)
 
 
+def test_rotate_explicit_end_screen_overrides_bundled(
+        image_folder, make_image, tmp_path, capture_ctx, rotate_assets,
+        fake_ffmpeg_lines):
+    folder = _folder_with_cover(image_folder, make_image, tmp_path)
+    custom = tmp_path / "custom-end.jpg"
+    make_image(1080, 1920).save(custom)
+    out = tmp_path / "rot.mp4"
+    rotate_video.run(folder=str(folder), total_duration_seconds=10,
+                     cover_image="cover.jpg", end_screen=str(custom),
+                     output=str(out), ctx=capture_ctx)
+    cmd = fake_ffmpeg_lines[0].cmd
+    assert str(custom) in cmd
+    assert rotate_video.ENDSCREEN_PNG not in cmd  # bundled asset unused
+
+
 def test_rotate_single_horizontal(image_folder, make_image, tmp_path,
                                   capture_ctx, rotate_assets, fake_ffmpeg_lines):
     folder = _folder_with_cover(image_folder, make_image, tmp_path,
