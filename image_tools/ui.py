@@ -20,6 +20,7 @@ from . import (
     RunContext,
     WALLS_DIR,
     ensure_output_dir,
+    list_template_sets,
     template_for,
 )
 from . import carousel as carousel_mod
@@ -277,6 +278,7 @@ _GLOBAL_TITLE_KEY = "_global.title"
 _GLOBAL_TITLE_FONT_KEY = "_global.title_font"
 _GLOBAL_SUBTITLE_KEY = "_global.subtitle"
 _GLOBAL_SUBTITLE_FONT_KEY = "_global.subtitle_font"
+_GLOBAL_TEMPLATE_SET_KEY = "_global.template_set"
 
 _global_vars = {}  # key -> tk.StringVar, created lazily by _make_global_var
 
@@ -315,6 +317,19 @@ def _current_subtitle():
 
 def _current_subtitle_font():
     return _make_global_var(_GLOBAL_SUBTITLE_FONT_KEY).get().strip()
+
+
+def _default_template_set():
+    """Preferred default template set: "mvp" if present, else the first one."""
+    sets = list_template_sets()
+    if "mvp" in sets:
+        return "mvp"
+    return sets[0] if sets else ""
+
+
+def _current_template_set():
+    return _make_global_var(
+        _GLOBAL_TEMPLATE_SET_KEY, _default_template_set()).get().strip() or None
 
 
 def _pick_music_into(var, parent=None):
@@ -1195,7 +1210,8 @@ class ScrollVideoTab(RunnerTab):
         music = _current_music()
         if music:
             kw["music"] = music
-        end_screen = template_for(self.aspect.get(), "end-screen")
+        end_screen = template_for(self.aspect.get(), "end-screen",
+                                  template_set=_current_template_set())
         if end_screen:
             kw["end_screen"] = end_screen
         if self.output.get().strip():
@@ -1424,7 +1440,8 @@ class ReelTab(RunnerTab):
         if music:
             kw["music"] = music
         # Reels are vertical — resolve the 9:16 end-screen template.
-        end_screen = template_for("9:16", "end-screen")
+        end_screen = template_for("9:16", "end-screen",
+                                  template_set=_current_template_set())
         if end_screen:
             kw["end_screen"] = end_screen
         if self.beats_per_transition.get().strip():
@@ -1779,10 +1796,13 @@ class KenBurnsTab(RunnerTab):
             kw["music"] = music
         if self.gimmick.get():
             kw["gimmick"] = True
-        end_screen = template_for(self.aspect.get(), "end-screen")
+        tset = _current_template_set()
+        end_screen = template_for(self.aspect.get(), "end-screen",
+                                  template_set=tset)
         if end_screen:
             kw["end_screen"] = end_screen
-        title_screen = template_for(self.aspect.get(), "title-screen")
+        title_screen = template_for(self.aspect.get(), "title-screen",
+                                    template_set=tset)
         if title_screen:
             kw["title_screen"] = title_screen
         title = _current_title()
@@ -1933,6 +1953,15 @@ def _build_project_bar(root):
     ttk.Button(top, text="Clone...", command=on_clone).pack(side="left")
     ttk.Button(top, text="Delete", command=on_delete).pack(side="left",
                                                             padx=(6, 0))
+
+    # Template set (subdirectory of assets/templates/) used for the title and
+    # end screens. Per-project, chosen from a dropdown of available sets.
+    template_var = _make_global_var(_GLOBAL_TEMPLATE_SET_KEY,
+                                    _default_template_set())
+    ttk.Label(top, text="Templates:").pack(side="left", padx=(16, 0))
+    ttk.Combobox(top, textvariable=template_var, state="readonly",
+                 values=list_template_sets(), width=18).pack(side="left",
+                                                             padx=(6, 0))
 
     # Row 2: shared image folder for the current project. Changing the folder
     # always creates a new (user-named) project, so each image directory maps

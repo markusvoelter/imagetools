@@ -14,18 +14,36 @@ DEFAULT_WATERMARK = os.path.join(WATERMARKS_DIR, "watermark.png")
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
 
 
-def template_for(aspect, kind, ext="jpg"):
+def list_template_sets():
+    """Names of the template-set subdirectories under `assets/templates/`
+    (e.g. "mvp"), sorted. Returns [] if the templates dir is missing."""
+    try:
+        return sorted(
+            name for name in os.listdir(TEMPLATES_DIR)
+            if os.path.isdir(os.path.join(TEMPLATES_DIR, name))
+        )
+    except OSError:
+        return []
+
+
+def template_for(aspect, kind, ext="jpg", template_set=None):
     """Return the path to an aspect-specific template asset, or None if it
     does not exist.
 
     `aspect` is a ratio like "16:9" or "9:16"; the folder name uses "_"
     instead of ":". `kind` is a filename stem such as "title-screen" or
-    "end-screen".
+    "end-screen". `template_set` selects a subdirectory under
+    `assets/templates/` (e.g. "mvp"); when None the aspect folder is looked
+    up directly under `assets/templates/`.
     """
     if not aspect:
         return None
     folder = aspect.replace(":", "_")
-    path = os.path.join(TEMPLATES_DIR, folder, f"{kind}.{ext}")
+    parts = [TEMPLATES_DIR]
+    if template_set:
+        parts.append(template_set)
+    parts.append(folder)
+    path = os.path.join(*parts, f"{kind}.{ext}")
     return path if os.path.isfile(path) else None
 
 

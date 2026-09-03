@@ -428,6 +428,27 @@ def test_global_title_subtitle_and_fonts_flow_into_kenburns(
     assert kw["subtitle_font"] == "/fonts/b.ttf"
 
 
+def test_template_set_selects_title_and_end_screens(root, fresh_store,
+                                                    tmp_path, monkeypatch):
+    import image_tools
+    templates = tmp_path / "templates"
+    (templates / "fancy" / "16_9").mkdir(parents=True)
+    for kind in ("title-screen", "end-screen"):
+        (templates / "fancy" / "16_9" / f"{kind}.jpg").write_bytes(b"x")
+    monkeypatch.setattr(image_tools, "TEMPLATES_DIR", str(templates))
+    monkeypatch.setattr(ui, "_current_image_folder", lambda: str(tmp_path))
+    ui._make_global_var(ui._GLOBAL_TEMPLATE_SET_KEY, "").set("fancy")
+
+    tab = ui.KenBurnsTab(root)
+    tab.aspect.set("16:9")
+    kw = tab._gather_kwargs()
+
+    assert kw["title_screen"] == str(
+        templates / "fancy" / "16_9" / "title-screen.jpg")
+    assert kw["end_screen"] == str(
+        templates / "fancy" / "16_9" / "end-screen.jpg")
+
+
 # --------------------------------------------------------------------------
 #  Changing the images folder forces creation of a new, named project
 # --------------------------------------------------------------------------

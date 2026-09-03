@@ -81,3 +81,22 @@ def test_template_for_finds_existing_asset(tmp_path, monkeypatch):
     asset = folder / "title-screen.jpg"
     asset.write_bytes(b"not-really-a-jpeg")
     assert template_for("16:9", "title-screen") == str(asset)
+
+
+def test_template_for_uses_template_set_subdir(tmp_path, monkeypatch):
+    monkeypatch.setattr(image_tools, "TEMPLATES_DIR", str(tmp_path))
+    folder = tmp_path / "mvp" / "16_9"
+    folder.mkdir(parents=True)
+    asset = folder / "end-screen.jpg"
+    asset.write_bytes(b"x")
+    assert template_for("16:9", "end-screen", template_set="mvp") == str(asset)
+    # Without the set, the aspect folder isn't found directly under templates.
+    assert template_for("16:9", "end-screen") is None
+
+
+def test_list_template_sets_returns_sorted_subdirs(tmp_path, monkeypatch):
+    monkeypatch.setattr(image_tools, "TEMPLATES_DIR", str(tmp_path))
+    (tmp_path / "mvp").mkdir()
+    (tmp_path / "fancy").mkdir()
+    (tmp_path / "note.txt").write_text("not a dir")
+    assert image_tools.list_template_sets() == ["fancy", "mvp"]
