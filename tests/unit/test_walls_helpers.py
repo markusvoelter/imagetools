@@ -64,6 +64,21 @@ def test_crop_cost_grows_with_mismatch_and_is_symmetric():
     assert walls.crop_cost(2.0, 1.0) == pytest.approx(walls.crop_cost(1.0, 2.0))
 
 
+# --- choose_wall ----------------------------------------------------------
+
+def test_choose_wall_favors_low_crop_but_still_varies():
+    import random
+    from collections import Counter
+
+    candidates = [("wide", 3.0), ("tall", 0.33)]
+    random.seed(0)
+    picks = Counter(walls.choose_wall(candidates, 4.0)[0] for _ in range(200))
+    # A 4:1 image crops far less in the wide box, so it's chosen more often...
+    assert picks["wide"] > picks["tall"]
+    # ...but the tall wall still shows up: the random element is preserved.
+    assert picks["tall"] > 0
+
+
 # --- wall_box_ratio -------------------------------------------------------
 
 def test_wall_box_ratio_reflects_empty_rectangle(tmp_path, make_image):

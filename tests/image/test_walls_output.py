@@ -26,9 +26,9 @@ def photo_folder(tmp_path, make_image):
     return folder
 
 
-def test_walls_matches_image_to_least_cropping_wall(tmp_path, capture_ctx):
-    # Two walls with very different box shapes: a wide (landscape) hole and a
-    # tall (portrait) hole.
+def test_walls_varies_walls_while_favoring_low_crop(tmp_path, capture_ctx):
+    # Two walls with different box shapes: a wide (landscape) hole and a tall
+    # (portrait) hole.
     walls_dir = tmp_path / "walls"
     walls_dir.mkdir()
     wide = Image.new("RGB", (800, 800), (255, 255, 255))
@@ -38,18 +38,21 @@ def test_walls_matches_image_to_least_cropping_wall(tmp_path, capture_ctx):
     tall.paste((0, 0, 0), (300, 100, 500, 700))  # 200x600 box -> ~0.33
     tall.save(walls_dir / "tall.png")
 
+    # All-landscape photos: the wide wall crops them least.
     photos = tmp_path / "photos"
     photos.mkdir()
-    Image.new("RGB", (1600, 400), (10, 20, 30)).save(photos / "landscape.jpg")
-    Image.new("RGB", (400, 1600), (30, 20, 10)).save(photos / "portrait.jpg")
+    for i in range(3):
+        Image.new("RGB", (1600, 400), (10, 20, 30)).save(photos / f"p{i}.jpg")
 
     out = tmp_path / "out"
     walls.run(wall_folder=str(walls_dir), image_folder=str(photos),
-              num_outputs=2, output_dir=str(out), seed=0, ctx=capture_ctx)
+              num_outputs=24, output_dir=str(out), seed=0, ctx=capture_ctx)
 
-    logs = capture_ctx.logs
-    assert any("wide.png" in l and "landscape.jpg" in l for l in logs)
-    assert any("tall.png" in l and "portrait.jpg" in l for l in logs)
+    lines = [l for l in capture_ctx.logs if "composite_" in l and "->" in l]
+    used_wide = sum("wide.png" in l for l in lines)
+    used_tall = sum("tall.png" in l for l in lines)
+    assert used_wide > used_tall     # low-crop wall favored
+    assert used_wide > 0 and used_tall > 0  # ...but both walls get used
 
 
 def test_walls_produces_composites(tmp_path, wall_folder, photo_folder,

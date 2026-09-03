@@ -59,11 +59,25 @@ def fit_image_to_box(img, box_w, box_h):
     return img.crop((left, top, left + box_w, top + box_h))
 
 
+WALL_MATCH_EPS = 0.05  # smaller -> selection favors the best-matching wall harder
+
+
 def crop_cost(image_ratio, box_ratio):
     """Fraction of the image cropped away when cover-fitting it into a box of
     the given aspect ratio. 0 = perfect fit (no cropping); larger = more."""
     lo, hi = sorted((image_ratio, box_ratio))
     return 1.0 - lo / hi
+
+
+def choose_wall(walls, image_ratio):
+    """Pick a wall for an image of aspect `image_ratio`, weighted-random toward
+    the walls that crop it least so results still vary across outputs.
+
+    `walls` is a list of `(wall_path, box_ratio)`. Returns one such tuple.
+    """
+    weights = [1.0 / (WALL_MATCH_EPS + crop_cost(image_ratio, box_ratio))
+               for _, box_ratio in walls]
+    return random.choices(walls, weights=weights, k=1)[0]
 
 
 def wall_box_ratio(wall_path):
@@ -167,16 +181,15 @@ def run(*, wall_folder, image_folder, num_outputs, output_dir=None, seed=None,
         raise RuntimeError("No readable source images.")
 
     # Go through the images in a random order (for variety across outputs) and
-    # pair each with the wall whose empty rectangle best matches its aspect
-    # ratio, so the image is cropped as little as possible.
+    # pair each with a wall, weighted-random toward the walls that crop it
+    # least — so cropping stays low but the wall still varies.
     order = list(images)
     random.shuffle(order)
 
     for i in range(num_outputs):
         ctx.check_cancelled()
         img_path, img_ratio = order[i % len(order)]
-        wall_path, box_ratio = min(
-            walls, key=lambda w: crop_cost(img_ratio, w[1]))
+        wall_path, box_ratio = choose_wall(walls, img_ratio)
         out_path = os.path.join(output_dir, f"composite_{i + 1:03d}.png")
         try:
             compose(wall_path, img_path, out_path)
