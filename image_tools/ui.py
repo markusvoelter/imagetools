@@ -521,7 +521,8 @@ class RunnerTab(ttk.Frame):
 
     persist_prefix = None  # subclasses override
 
-    # Every tab stores its result in the selected images folder, named
+    # Every tab stores its result under a per-tool subdirectory of the selected
+    # images folder ("<folder>/<output_label>/"), named
     # "<project> <output_label> <timestamp>". `output_ext` is the file
     # extension for single-file outputs, or None for tools that write a
     # directory of files.
@@ -529,13 +530,13 @@ class RunnerTab(ttk.Frame):
     output_ext = None
 
     def _default_output(self, folder):
-        """Default output path inside the input `folder`, named after the
-        current project, this tool, and a timestamp."""
+        """Default output path inside the input `folder`, under a subdirectory
+        named after this tool, named for the project, tool, and a timestamp."""
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         name = f"{_store.current_project} {self.output_label} {ts}"
         if self.output_ext:
             name += self.output_ext
-        return os.path.join(folder, name)
+        return os.path.join(folder, self.output_label, name)
 
     def __init__(self, master, run_fn, default_input_dir=None):
         super().__init__(master, padding=10)

@@ -339,7 +339,8 @@ import re
 
 
 def _assert_default_output(path, folder, project, label, ext):
-    assert os.path.dirname(path) == str(folder)
+    # Output lands in a per-tool subdirectory named by the tab label.
+    assert os.path.dirname(path) == os.path.join(str(folder), label)
     pat = rf"{re.escape(project)} {re.escape(label)} \d{{8}}_\d{{6}}{re.escape(ext)}"
     assert re.fullmatch(pat, os.path.basename(path)), path
 
