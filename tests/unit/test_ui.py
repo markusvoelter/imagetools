@@ -384,6 +384,15 @@ def test_split_output_dir_defaults_into_input_folder(root, fresh_store,
                            tmp_path, "Trip", "split", "")
 
 
+def test_split_overview_checkbox_flows_into_kwargs(root, fresh_store, tmp_path,
+                                                   monkeypatch):
+    monkeypatch.setattr(ui, "_current_image_folder", lambda: str(tmp_path))
+    tab = ui.SplitTab(root)
+    assert tab._gather_kwargs()["include_overview"] is True  # default on
+    tab.include_overview.set(False)
+    assert tab._gather_kwargs()["include_overview"] is False
+
+
 def test_output_respects_explicit_override(root, fresh_store, tmp_path,
                                            monkeypatch):
     monkeypatch.setattr(ui, "_current_image_folder", lambda: str(tmp_path))

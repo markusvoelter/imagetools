@@ -51,6 +51,16 @@ def test_substantial_last_slide_is_kept(tmp_path, image_folder, capture_ctx):
     assert not any("dropping it" in line for line in capture_ctx.logs)
 
 
+def test_overview_slide_can_be_disabled(tmp_path, image_folder, capture_ctx):
+    # Same 3000x400 source that yields 15 slides with the overview on; with it
+    # off there is no trailing overview slide -> 14.
+    folder = image_folder([(3000, 400)])
+    out = tmp_path / "out"
+    split.run(folder=str(folder), aspect_ratio="9:16", include_overview=False,
+              output_dir=str(out), ctx=capture_ctx)
+    assert len(_slides(out)) == 14
+
+
 def test_wide_image_splits_into_expected_tiles_plus_overview(
         tmp_path, image_folder, capture_ctx):
     # 3000x400 source, 9:16 slide -> piece_w = round(400 * 9/16) = 225.

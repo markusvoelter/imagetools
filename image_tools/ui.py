@@ -1576,6 +1576,8 @@ class SplitTab(RunnerTab):
         self.aspect_ratio = self.pvar("aspect_ratio", "9:16")
         self.output_dir = self.pvar("output_dir", "")
         self.bg = self.pvar("bg", "")
+        self.include_overview = self.pvar("include_overview", True,
+                                          tk.BooleanVar)
 
         grid = ttk.Frame(self)
         grid.pack(fill="x")
@@ -1586,6 +1588,12 @@ class SplitTab(RunnerTab):
         ttk.Combobox(grid, textvariable=self.aspect_ratio,
                      values=list(split_mod.ASPECT_RATIOS.keys()),
                      state="readonly").grid(row=r, column=1, sticky="w", padx=4)
+        r += 1
+
+        ttk.Checkbutton(
+            grid, variable=self.include_overview,
+            text="Add final overview slide (whole image on blurred background)"
+        ).grid(row=r, column=0, columnspan=3, sticky="w", pady=2)
         r += 1
 
         ttk.Label(grid, text="Output folder (optional)").grid(row=r, column=0, sticky="w", pady=2)
@@ -1616,6 +1624,7 @@ class SplitTab(RunnerTab):
         kw = {
             "folder": folder,
             "aspect_ratio": self.aspect_ratio.get(),
+            "include_overview": self.include_overview.get(),
         }
         if self.output_dir.get().strip():
             kw["output_dir"] = self.output_dir.get().strip()

@@ -76,7 +76,8 @@ def _build_overview_slide(img, piece_w, piece_h):
     return canvas
 
 
-def _split_one(image, aspect_ratio, output_dir, bg_color, ctx):
+def _split_one(image, aspect_ratio, output_dir, bg_color, ctx,
+               include_overview=True):
     """Split a single image into carousel slides in `output_dir`."""
     img = Image.open(image).convert("RGB")
     src_w, src_h = img.size
@@ -143,7 +144,7 @@ def _split_one(image, aspect_ratio, output_dir, bg_color, ctx):
 
     # Trailing overview slide: only meaningful when the source was actually
     # split (otherwise the single padded slide is already the whole image).
-    if len(pieces) > 1:
+    if include_overview and len(pieces) > 1:
         ctx.check_cancelled()
         overview = _build_overview_slide(img, piece_w, src_h)
         out_path = os.path.join(
@@ -152,17 +153,20 @@ def _split_one(image, aspect_ratio, output_dir, bg_color, ctx):
         ctx.log(f"  Saved {out_path} (full-image overview)")
 
 
-def run(*, folder, aspect_ratio="9:16", output_dir=None, bg=None, ctx=None):
+def run(*, folder, aspect_ratio="9:16", output_dir=None, bg=None,
+        include_overview=True, ctx=None):
     """Slice every image in `folder` into carousel slides.
 
-    folder        absolute path to a folder of source photos
-    aspect_ratio  one of ASPECT_RATIOS keys
-    output_dir    absolute parent dir for per-image `split_<name>_<ts>/`
-                  subfolders; defaults to `folder` itself (subfolders sit
-                  next to the source images)
-    bg            hex padding color used only when a source is narrower
-                  than one slide
-    ctx           RunContext
+    folder            absolute path to a folder of source photos
+    aspect_ratio      one of ASPECT_RATIOS keys
+    output_dir        absolute parent dir for per-image `split_<name>_<ts>/`
+                      subfolders; defaults to `folder` itself (subfolders sit
+                      next to the source images)
+    bg                hex padding color used only when a source is narrower
+                      than one slide
+    include_overview  if True, append a final overview slide showing the whole
+                      image fitted onto a blurred background
+    ctx               RunContext
     """
     if ctx is None:
         ctx = RunContext()
@@ -205,6 +209,7 @@ def run(*, folder, aspect_ratio="9:16", output_dir=None, bg=None, ctx=None):
             output_dir=image_out_dir,
             bg_color=bg_color,
             ctx=ctx,
+            include_overview=include_overview,
         )
 
     return parent_dir
