@@ -25,7 +25,6 @@ SCROLL_SECONDS_PER_SLIDE = 1.0          # seconds per slide-width at REFERENCE_S
 REFERENCE_SCROLL_PCT = 200              # speed value mapped to the reference duration
 SCROLL_AUDIO_FADE_OUT_S = 1.5           # tail fade applied to the music
 
-SCROLL_END_SCREEN_PADDING_FRAC = 0.08   # padding around end-screen image (frac of width)
 SCROLL_END_SCREEN_FADE_S = 0.5          # crossfade from last slide to end screen
 SCROLL_END_SCREEN_HOLD_S = 3.0          # how long the end screen is held
 SCROLL_END_SCREEN_BG = (0, 0, 0)        # bg color behind the end-screen image
@@ -106,18 +105,15 @@ def _build_image_grid_strip(folder, aspect_ratio, ctx):
 
 def _build_end_screen_frame(end_screen_path, out_width, out_height,
                             bg_color=SCROLL_END_SCREEN_BG):
-    """Compose an end-screen frame at (out_width, out_height): bg color filling
-    the canvas with the user's image centered on top, padded, using the image's
-    alpha channel as the paste mask."""
+    """Full-screen end frame at (out_width, out_height): the image is scaled to
+    cover the whole canvas and center-cropped, composited over bg_color so any
+    alpha edges fall back to the background."""
     frame = Image.new('RGB', (out_width, out_height), bg_color)
     img = Image.open(end_screen_path)
     if img.mode != 'RGBA':
         img = img.convert('RGBA')
-    pad = int(round(out_width * SCROLL_END_SCREEN_PADDING_FRAC))
-    avail_w = max(1, out_width - 2 * pad)
-    avail_h = max(1, out_height - 2 * pad)
     iw, ih = img.size
-    scale = min(avail_w / iw, avail_h / ih)
+    scale = max(out_width / iw, out_height / ih)  # cover (fill, may crop)
     new_w = max(1, int(round(iw * scale)))
     new_h = max(1, int(round(ih * scale)))
     img = img.resize((new_w, new_h), Image.LANCZOS)
