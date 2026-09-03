@@ -1050,8 +1050,9 @@ class RotateVideoTab(RunnerTab):
         music = _current_music()
         if music:
             kw["music"] = music
-        # Rotate video is 9:16 — use the selected template set's end screen.
-        end_screen = template_for("9:16", "end-screen",
+        # The end screen is transposed into portrait like the horizontal
+        # photos, so use the horizontal (16:9) template from the selected set.
+        end_screen = template_for("16:9", "end-screen",
                                   template_set=_current_template_set())
         if end_screen:
             kw["end_screen"] = end_screen

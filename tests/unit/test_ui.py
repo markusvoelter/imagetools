@@ -450,12 +450,13 @@ def test_template_set_selects_title_and_end_screens(root, fresh_store,
         templates / "fancy" / "16_9" / "end-screen.jpg")
 
 
-def test_rotate_tab_uses_template_end_screen(root, fresh_store, tmp_path,
-                                             monkeypatch):
+def test_rotate_tab_uses_horizontal_template_end_screen(root, fresh_store,
+                                                        tmp_path, monkeypatch):
     import image_tools
     templates = tmp_path / "templates"
-    (templates / "mvp" / "9_16").mkdir(parents=True)
-    end = templates / "mvp" / "9_16" / "end-screen.jpg"
+    # Rotate video transposes the end screen, so it uses the 16:9 template.
+    (templates / "mvp" / "16_9").mkdir(parents=True)
+    end = templates / "mvp" / "16_9" / "end-screen.jpg"
     end.write_bytes(b"x")
     monkeypatch.setattr(image_tools, "TEMPLATES_DIR", str(templates))
     monkeypatch.setattr(ui, "_current_image_folder", lambda: str(tmp_path))
