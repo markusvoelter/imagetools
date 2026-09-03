@@ -26,7 +26,10 @@ def list_template_sets():
         return []
 
 
-def template_for(aspect, kind, ext="jpg", template_set=None):
+TEMPLATE_EXTENSIONS = ("jpg", "jpeg", "png")
+
+
+def template_for(aspect, kind, ext=None, template_set=None):
     """Return the path to an aspect-specific template asset, or None if it
     does not exist.
 
@@ -34,7 +37,9 @@ def template_for(aspect, kind, ext="jpg", template_set=None):
     instead of ":". `kind` is a filename stem such as "title-screen" or
     "end-screen". `template_set` selects a subdirectory under
     `assets/templates/` (e.g. "mvp"); when None the aspect folder is looked
-    up directly under `assets/templates/`.
+    up directly under `assets/templates/`. `ext` forces a single file
+    extension; when None, `jpg`/`jpeg`/`png` are tried in order and the first
+    existing file is returned.
     """
     if not aspect:
         return None
@@ -43,8 +48,12 @@ def template_for(aspect, kind, ext="jpg", template_set=None):
     if template_set:
         parts.append(template_set)
     parts.append(folder)
-    path = os.path.join(*parts, f"{kind}.{ext}")
-    return path if os.path.isfile(path) else None
+    exts = (ext,) if ext else TEMPLATE_EXTENSIONS
+    for e in exts:
+        path = os.path.join(*parts, f"{kind}.{e}")
+        if os.path.isfile(path):
+            return path
+    return None
 
 
 class RunCancelled(Exception):

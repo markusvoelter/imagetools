@@ -94,6 +94,25 @@ def test_template_for_uses_template_set_subdir(tmp_path, monkeypatch):
     assert template_for("16:9", "end-screen") is None
 
 
+def test_template_for_falls_back_to_png(tmp_path, monkeypatch):
+    monkeypatch.setattr(image_tools, "TEMPLATES_DIR", str(tmp_path))
+    folder = tmp_path / "16_9"
+    folder.mkdir()
+    asset = folder / "title-screen.png"  # only a PNG exists
+    asset.write_bytes(b"x")
+    assert template_for("16:9", "title-screen") == str(asset)
+
+
+def test_template_for_prefers_jpg_over_png(tmp_path, monkeypatch):
+    monkeypatch.setattr(image_tools, "TEMPLATES_DIR", str(tmp_path))
+    folder = tmp_path / "16_9"
+    folder.mkdir()
+    (folder / "end-screen.png").write_bytes(b"x")
+    jpg = folder / "end-screen.jpg"
+    jpg.write_bytes(b"x")
+    assert template_for("16:9", "end-screen") == str(jpg)
+
+
 def test_list_template_sets_returns_sorted_subdirs(tmp_path, monkeypatch):
     monkeypatch.setattr(image_tools, "TEMPLATES_DIR", str(tmp_path))
     (tmp_path / "mvp").mkdir()
