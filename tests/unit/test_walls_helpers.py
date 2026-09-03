@@ -51,9 +51,24 @@ def test_collect_files_sorted_and_deduped(tmp_path, make_image):
     assert [f.name for f in files] == ["a.png", "b.jpg", "c.jpeg"]
 
 
-# --- pick_image_for_ratio -------------------------------------------------
+# --- crop_cost ------------------------------------------------------------
 
-def test_pick_image_for_ratio_single_candidate(tmp_path, make_image):
-    p = tmp_path / "only.jpg"
-    make_image(160, 90).save(p)
-    assert walls.pick_image_for_ratio([p], 16 / 9) == p
+def test_crop_cost_zero_when_aspects_match():
+    assert walls.crop_cost(1.5, 1.5) == 0.0
+
+
+def test_crop_cost_grows_with_mismatch_and_is_symmetric():
+    near = walls.crop_cost(1.6, 1.5)
+    far = walls.crop_cost(2.4, 1.5)
+    assert 0 < near < far
+    assert walls.crop_cost(2.0, 1.0) == pytest.approx(walls.crop_cost(1.0, 2.0))
+
+
+# --- wall_box_ratio -------------------------------------------------------
+
+def test_wall_box_ratio_reflects_empty_rectangle(tmp_path, make_image):
+    # A 200-wide by 100-tall black box -> ~2.0 aspect ratio.
+    wall = _wall_with_black_box(400, 400, (50, 100, 250, 200))
+    path = tmp_path / "wall.png"
+    wall.save(path)
+    assert walls.wall_box_ratio(path) == pytest.approx(2.0, abs=0.05)

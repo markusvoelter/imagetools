@@ -59,20 +59,21 @@ def fit_image_to_box(img, box_w, box_h):
     return img.crop((left, top, left + box_w, top + box_h))
 
 
-def pick_image_for_ratio(image_files, target_ratio):
-    weights = []
-    for f in image_files:
-        try:
-            with Image.open(f) as im:
-                ratio = im.size[0] / im.size[1]
-        except Exception:
-            ratio = target_ratio
-        diff = abs(np.log(ratio) - np.log(target_ratio))
-        weights.append(1.0 / (0.05 + diff))
-    return random.choices(image_files, weights=weights, k=1)[0]
+def crop_cost(image_ratio, box_ratio):
+    """Fraction of the image cropped away when cover-fitting it into a box of
+    the given aspect ratio. 0 = perfect fit (no cropping); larger = more."""
+    lo, hi = sorted((image_ratio, box_ratio))
+    return 1.0 - lo / hi
 
 
-def compose(wall_path, image_files, output_path):
+def wall_box_ratio(wall_path):
+    """Aspect ratio (w/h) of a wall's empty rectangle. Raises if none found."""
+    with Image.open(wall_path) as wall:
+        x0, y0, x1, y1 = find_empty_rectangle(wall)
+    return (x1 - x0 + 1) / (y1 - y0 + 1)
+
+
+def compose(wall_path, image_path, output_path):
     wall = Image.open(wall_path).convert("RGB")
     x0, y0, x1, y1 = find_empty_rectangle(wall)
     box_w = x1 - x0 + 1
@@ -81,15 +82,13 @@ def compose(wall_path, image_files, output_path):
     frame_thickness = max(2, int(round(min(box_w, box_h) * FRAME_FRAC)))
     inner_w = box_w - 2 * frame_thickness
     inner_h = box_h - 2 * frame_thickness
-    target_ratio = inner_w / inner_h
 
-    img_path = pick_image_for_ratio(image_files, target_ratio)
-    photo = Image.open(img_path).convert("RGB")
+    photo = Image.open(image_path).convert("RGB")
     photo_fitted = fit_image_to_box(photo, inner_w, inner_h)
 
     wall.paste(photo_fitted, (x0 + frame_thickness, y0 + frame_thickness))
     wall.save(output_path)
-    return img_path
+    return image_path
 
 
 def collect_files(folder, exts):
@@ -146,14 +145,44 @@ def run(*, wall_folder, image_folder, num_outputs, output_dir=None, seed=None,
     ctx.log(f"Photos: {len(image_files)} candidates in {image_folder}")
     ctx.log(f"Output: {output_dir}")
 
+    # Precompute each wall's empty-box aspect ratio (skipping walls with no
+    # detectable rectangle) and each image's aspect ratio, so we can pair them.
+    walls = []
+    for wall_path in wall_files:
+        try:
+            walls.append((wall_path, wall_box_ratio(wall_path)))
+        except Exception as e:  # noqa: BLE001
+            ctx.log(f"Skipping wall {wall_path.name}: {e}")
+    if not walls:
+        raise RuntimeError("No wall image with a detectable empty rectangle.")
+
+    images = []
+    for img_path in image_files:
+        try:
+            with Image.open(img_path) as im:
+                images.append((img_path, im.size[0] / im.size[1]))
+        except Exception as e:  # noqa: BLE001
+            ctx.log(f"Skipping image {img_path.name}: {e}")
+    if not images:
+        raise RuntimeError("No readable source images.")
+
+    # Go through the images in a random order (for variety across outputs) and
+    # pair each with the wall whose empty rectangle best matches its aspect
+    # ratio, so the image is cropped as little as possible.
+    order = list(images)
+    random.shuffle(order)
+
     for i in range(num_outputs):
         ctx.check_cancelled()
-        wall_path = random.choice(wall_files)
+        img_path, img_ratio = order[i % len(order)]
+        wall_path, box_ratio = min(
+            walls, key=lambda w: crop_cost(img_ratio, w[1]))
         out_path = os.path.join(output_dir, f"composite_{i + 1:03d}.png")
         try:
-            used_img = compose(wall_path, image_files, out_path)
+            compose(wall_path, img_path, out_path)
+            crop_pct = crop_cost(img_ratio, box_ratio) * 100
             ctx.log(f"[{i + 1}/{num_outputs}] {wall_path.name} + "
-                    f"{used_img.name} -> {out_path}")
+                    f"{img_path.name} -> {out_path} (crop {crop_pct:.0f}%)")
         except Exception as e:
             ctx.log(f"[{i + 1}/{num_outputs}] FAILED on {wall_path.name}: {e}")
 

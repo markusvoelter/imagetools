@@ -26,6 +26,32 @@ def photo_folder(tmp_path, make_image):
     return folder
 
 
+def test_walls_matches_image_to_least_cropping_wall(tmp_path, capture_ctx):
+    # Two walls with very different box shapes: a wide (landscape) hole and a
+    # tall (portrait) hole.
+    walls_dir = tmp_path / "walls"
+    walls_dir.mkdir()
+    wide = Image.new("RGB", (800, 800), (255, 255, 255))
+    wide.paste((0, 0, 0), (100, 300, 700, 500))  # 600x200 box -> ~3.0
+    wide.save(walls_dir / "wide.png")
+    tall = Image.new("RGB", (800, 800), (255, 255, 255))
+    tall.paste((0, 0, 0), (300, 100, 500, 700))  # 200x600 box -> ~0.33
+    tall.save(walls_dir / "tall.png")
+
+    photos = tmp_path / "photos"
+    photos.mkdir()
+    Image.new("RGB", (1600, 400), (10, 20, 30)).save(photos / "landscape.jpg")
+    Image.new("RGB", (400, 1600), (30, 20, 10)).save(photos / "portrait.jpg")
+
+    out = tmp_path / "out"
+    walls.run(wall_folder=str(walls_dir), image_folder=str(photos),
+              num_outputs=2, output_dir=str(out), seed=0, ctx=capture_ctx)
+
+    logs = capture_ctx.logs
+    assert any("wide.png" in l and "landscape.jpg" in l for l in logs)
+    assert any("tall.png" in l and "portrait.jpg" in l for l in logs)
+
+
 def test_walls_produces_composites(tmp_path, wall_folder, photo_folder,
                                    capture_ctx):
     out = tmp_path / "out"
