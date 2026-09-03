@@ -9,6 +9,7 @@ produced when the source is narrower than one slide.
 """
 
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -33,6 +34,10 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
 # Overview slide: a very heavy Gaussian blur is applied to the background
 # crop so it reads as an out-of-focus ambient wash behind the fitted image.
 OVERVIEW_BLUR_RADIUS_FRAC = 0.04  # blur radius as fraction of slide width
+
+# If the final tile would use less than this fraction of a slide's width in
+# real image content (the rest being blurred padding), drop it entirely.
+MIN_LAST_SLIDE_FRAC = 0.20
 
 
 def _blurred_center_bg(img, out_w, out_h):
@@ -85,6 +90,12 @@ def _split_one(image, aspect_ratio, output_dir, bg_color, ctx):
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # Keep a copy of the untouched source alongside the slides.
+    original_copy = os.path.join(
+        output_dir, f"_original{os.path.splitext(image)[1].lower()}")
+    shutil.copy2(image, original_copy)
+    ctx.log(f"  Saved original {original_copy}")
+
     pieces = []
     if src_w <= piece_w:
         # Input narrower than (or exactly) one slide — pad to slide width.
@@ -99,7 +110,14 @@ def _split_one(image, aspect_ratio, output_dir, bg_color, ctx):
         # padded on the right with a heavily-blurred backdrop so it stays
         # full-bleed and visually cohesive.
         num_pieces = -(-src_w // piece_w)  # ceil
-        last_pad = num_pieces * piece_w - src_w
+        # If the final tile has very little real content (mostly padding),
+        # drop it rather than emit a mostly-blurred slide.
+        last_content = src_w - (num_pieces - 1) * piece_w
+        if num_pieces > 1 and last_content < MIN_LAST_SLIDE_FRAC * piece_w:
+            ctx.log(f"Last slide would use only {last_content}px "
+                    f"({last_content / piece_w:.0%} of a slide); dropping it.")
+            num_pieces -= 1
+        last_pad = max(0, num_pieces * piece_w - src_w)
         for i in range(num_pieces):
             ctx.check_cancelled()
             left = i * piece_w

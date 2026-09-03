@@ -18,6 +18,39 @@ def _slides(root):
     return sorted(Path(root).rglob("slide_*.jpg"))
 
 
+def test_original_is_copied_into_output(tmp_path, image_folder, capture_ctx):
+    folder = image_folder([(3000, 400)])
+    out = tmp_path / "out"
+    split.run(folder=str(folder), aspect_ratio="9:16",
+              output_dir=str(out), ctx=capture_ctx)
+    originals = sorted(Path(out).rglob("_original.*"))
+    assert len(originals) == 1
+    assert originals[0].name == "_original.jpg"
+    with Image.open(originals[0]) as im:
+        assert im.size == (3000, 400)  # untouched source dimensions
+
+
+def test_tiny_last_slide_is_dropped(tmp_path, image_folder, capture_ctx):
+    # piece_w = 225. 2955 -> ceil = 14 tiles, last tile only 30px (13% < 20%),
+    # so it's dropped: 13 tiles + 1 overview = 14.
+    folder = image_folder([(2955, 400)])
+    out = tmp_path / "out"
+    split.run(folder=str(folder), aspect_ratio="9:16",
+              output_dir=str(out), ctx=capture_ctx)
+    assert len(_slides(out)) == 14
+    assert any("dropping it" in line for line in capture_ctx.logs)
+
+
+def test_substantial_last_slide_is_kept(tmp_path, image_folder, capture_ctx):
+    # Last tile uses 75px (33% >= 20%): kept (padded). 14 tiles + overview = 15.
+    folder = image_folder([(3000, 400)])
+    out = tmp_path / "out"
+    split.run(folder=str(folder), aspect_ratio="9:16",
+              output_dir=str(out), ctx=capture_ctx)
+    assert len(_slides(out)) == 15
+    assert not any("dropping it" in line for line in capture_ctx.logs)
+
+
 def test_wide_image_splits_into_expected_tiles_plus_overview(
         tmp_path, image_folder, capture_ctx):
     # 3000x400 source, 9:16 slide -> piece_w = round(400 * 9/16) = 225.
