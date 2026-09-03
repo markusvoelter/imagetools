@@ -78,7 +78,7 @@ KB_SUBTITLE_FONT_CANDIDATES = (
     "/Library/Fonts/Arial.ttf",
     "/System/Library/Fonts/Helvetica.ttc",
 )
-KB_SUBTITLE_WIDTH_FRAC = 0.55       # subtitle spans this fraction of canvas width
+KB_SUBTITLE_SIZE_FRAC = 0.75        # subtitle font size as a fraction of the title's
 KB_SUBTITLE_COLOR = (210, 210, 210) # light grey for subtitle text
 # Text-slide hold time scales linearly with word count between these bounds.
 TEXT_SLIDE_MIN_FACTOR = 1.875  # held this many image-slide durations at MIN_WORDS or fewer
@@ -1048,9 +1048,10 @@ def _build_title_overlay(title_text, subtitle_text, out_w, out_h,
 
     has_subtitle = bool(subtitle_text)
     if has_subtitle:
-        sub_target_w = out_w * KB_SUBTITLE_WIDTH_FRAC
-        sub_size = _find_font_size_for_width(
-            subtitle_text, sub_target_w, max_font, font_loader=sub_loader)
+        # Subtitle is sized as a fixed fraction of the title so it always reads
+        # as secondary, regardless of how few characters it has (fitting it to
+        # its own width made short subtitles appear larger than the title).
+        sub_size = max(1, int(round(title_size * KB_SUBTITLE_SIZE_FRAC)))
         sub_font = sub_loader(sub_size)
         sub_bbox = _measure_text_bbox(subtitle_text, sub_font)
         sub_w = sub_bbox[2] - sub_bbox[0]
