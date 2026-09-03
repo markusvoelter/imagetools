@@ -279,6 +279,7 @@ _GLOBAL_TITLE_FONT_KEY = "_global.title_font"
 _GLOBAL_SUBTITLE_KEY = "_global.subtitle"
 _GLOBAL_SUBTITLE_FONT_KEY = "_global.subtitle_font"
 _GLOBAL_TEMPLATE_SET_KEY = "_global.template_set"
+_GLOBAL_SELECTED_TAB_KEY = "_global.selected_tab"
 
 _global_vars = {}  # key -> tk.StringVar, created lazily by _make_global_var
 
@@ -330,6 +331,32 @@ def _default_template_set():
 def _current_template_set():
     return _make_global_var(
         _GLOBAL_TEMPLATE_SET_KEY, _default_template_set()).get().strip() or None
+
+
+def _selected_tab_label(nb):
+    """The text label of the notebook's current tab, or '' if none."""
+    try:
+        return nb.tab(nb.select(), "text")
+    except tk.TclError:
+        return ""
+
+
+def _save_selected_tab(nb):
+    """Persist the current tab label in the current project's store."""
+    label = _selected_tab_label(nb)
+    if label:
+        _store.set(_GLOBAL_SELECTED_TAB_KEY, label)
+
+
+def _restore_selected_tab(nb):
+    """Select the tab stored for the current project, if it still exists."""
+    label = _store.get(_GLOBAL_SELECTED_TAB_KEY, "")
+    if not label:
+        return
+    for tab_id in nb.tabs():
+        if nb.tab(tab_id, "text") == label:
+            nb.select(tab_id)
+            return
 
 
 def _pick_music_into(var, parent=None):
@@ -2050,6 +2077,26 @@ def main():
     nb.add(KenBurnsTab(nb),    text="Ken Burns")
     nb.add(WallsTab(nb),       text="Walls")
     nb.add(SplitTab(nb),       text="Long Image Split")
+
+    # Remember the selected tab per project: save on change, restore on the
+    # current project and whenever the project switches. The guard stops the
+    # programmatic restore from being written straight back.
+    _syncing_tab = {"v": False}
+
+    def _on_tab_changed(_evt=None):
+        if not _syncing_tab["v"]:
+            _save_selected_tab(nb)
+
+    def _restore_tab_for_project():
+        _syncing_tab["v"] = True
+        try:
+            _restore_selected_tab(nb)
+        finally:
+            _syncing_tab["v"] = False
+
+    nb.bind("<<NotebookTabChanged>>", _on_tab_changed)
+    _store.add_listener(_restore_tab_for_project)
+    _restore_tab_for_project()
 
     root.update_idletasks()
     root.lift()

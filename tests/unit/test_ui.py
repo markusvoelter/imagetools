@@ -626,6 +626,58 @@ def test_watcher_stop_is_idempotent(root, tmp_path):
 
 
 # --------------------------------------------------------------------------
+#  Selected tab is remembered per project
+# --------------------------------------------------------------------------
+
+def _notebook(root, *labels):
+    from tkinter import ttk
+    nb = ttk.Notebook(root)
+    for label in labels:
+        nb.add(ttk.Frame(nb), text=label)
+    return nb
+
+
+def test_selected_tab_saved_and_restored(root, fresh_store):
+    nb = _notebook(root, "Alpha", "Beta", "Gamma")
+    nb.select(nb.tabs()[1])  # user picks Beta
+    ui._save_selected_tab(nb)
+    assert fresh_store.get(ui._GLOBAL_SELECTED_TAB_KEY, "") == "Beta"
+
+    # A freshly built notebook (as on restart) restores the stored tab.
+    nb2 = _notebook(root, "Alpha", "Beta", "Gamma")
+    ui._restore_selected_tab(nb2)
+    assert nb2.tab(nb2.select(), "text") == "Beta"
+    nb.destroy()
+    nb2.destroy()
+
+
+def test_selected_tab_is_per_project(root, fresh_store):
+    nb = _notebook(root, "Alpha", "Beta")
+    fresh_store.clone_project("Other")  # switch to a second project
+    nb.select(nb.tabs()[1])
+    ui._save_selected_tab(nb)  # Other -> Beta
+
+    fresh_store.switch_project(ui._DEFAULT_PROJECT)
+    ui._restore_selected_tab(nb)  # Default has no stored tab -> unchanged
+    assert nb.tab(nb.select(), "text") == "Beta"
+
+    fresh_store.switch_project("Other")
+    nb.select(nb.tabs()[0])  # move away, then restore Other's choice
+    ui._restore_selected_tab(nb)
+    assert nb.tab(nb.select(), "text") == "Beta"
+    nb.destroy()
+
+
+def test_restore_selected_tab_ignores_unknown_label(root, fresh_store):
+    fresh_store.set(ui._GLOBAL_SELECTED_TAB_KEY, "Nonexistent")
+    nb = _notebook(root, "Alpha", "Beta")
+    nb.select(nb.tabs()[0])
+    ui._restore_selected_tab(nb)  # no matching tab -> no change, no error
+    assert nb.tab(nb.select(), "text") == "Alpha"
+    nb.destroy()
+
+
+# --------------------------------------------------------------------------
 #  main() — build the whole window, but never actually enter the event loop
 # --------------------------------------------------------------------------
 
